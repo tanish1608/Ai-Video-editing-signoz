@@ -1,0 +1,108 @@
+{
+  "title": "Kinetograph — Multi-Agent Pipeline",
+  "description": "Agent latency, LLM token usage, retries and errors for the Kinetograph video-editing agent graph.",
+  "tags": ["kinetograph", "llm", "agents"],
+  "layout": [
+    { "i": "agent-latency", "x": 0, "y": 0, "w": 6, "h": 3 },
+    { "i": "llm-tokens", "x": 6, "y": 0, "w": 6, "h": 3 },
+    { "i": "agent-errors", "x": 0, "y": 3, "w": 6, "h": 3 },
+    { "i": "agent-retries", "x": 6, "y": 3, "w": 6, "h": 3 }
+  ],
+  "widgets": [
+    {
+      "id": "agent-latency",
+      "title": "Agent latency (p95, by agent)",
+      "description": "kinetograph.agent.latency histogram, p95, grouped by agent.name",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "dataSource": "metrics",
+              "queryName": "A",
+              "aggregateAttribute": { "key": "kinetograph.agent.latency", "type": "Histogram" },
+              "timeAggregation": "p95",
+              "spaceAggregation": "p95",
+              "groupBy": [{ "key": "agent", "type": "tag" }],
+              "expression": "A",
+              "legend": "{{agent}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "llm-tokens",
+      "title": "LLM tokens (by system / direction)",
+      "description": "kinetograph.llm.tokens counter, summed, grouped by system + direction",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "dataSource": "metrics",
+              "queryName": "A",
+              "aggregateAttribute": { "key": "kinetograph.llm.tokens", "type": "Sum" },
+              "timeAggregation": "rate",
+              "spaceAggregation": "sum",
+              "groupBy": [
+                { "key": "system", "type": "tag" },
+                { "key": "direction", "type": "tag" }
+              ],
+              "expression": "A",
+              "legend": "{{system}} {{direction}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "agent-errors",
+      "title": "Agent errors (by agent)",
+      "description": "kinetograph.agent.errors counter, summed, grouped by agent",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "dataSource": "metrics",
+              "queryName": "A",
+              "aggregateAttribute": { "key": "kinetograph.agent.errors", "type": "Sum" },
+              "timeAggregation": "increase",
+              "spaceAggregation": "sum",
+              "groupBy": [{ "key": "agent", "type": "tag" }],
+              "expression": "A",
+              "legend": "{{agent}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "agent-retries",
+      "title": "Agent retries (by agent)",
+      "description": "kinetograph.agent.retries counter, summed, grouped by agent",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryData": [
+            {
+              "dataSource": "metrics",
+              "queryName": "A",
+              "aggregateAttribute": { "key": "kinetograph.agent.retries", "type": "Sum" },
+              "timeAggregation": "increase",
+              "spaceAggregation": "sum",
+              "groupBy": [{ "key": "agent", "type": "tag" }],
+              "expression": "A",
+              "legend": "{{agent}}"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

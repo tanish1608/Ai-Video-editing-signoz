@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+Kinetograph — an Electron desktop video editor. A React frontend (`desktop/`) talks over HTTP + WebSocket to a Python FastAPI backend (`backend/`) that runs a LangGraph multi-agent pipeline. The backend renders video through FFmpeg `filter_complex` (single-pass, hardware-accelerated), not MoviePy/frame-by-frame. In dev, Electron spawns the backend as a child "sidecar" process on port 8080; in production it runs a PyInstaller-bundled binary.
+
+## Commands
+
+Everything is driven from `./dev.sh` (preflight-checks venv, backend install, node_modules, FFmpeg, `.env`):
+
+```bash
+./dev.sh              # backend + Electron together
+./dev.sh backend      # backend only (uvicorn --reload on :8080)
+./dev.sh desktop      # frontend only; sets KINETOGRAPH_EXTERNAL_BACKEND=1 so Electron won't spawn its own backend
+```
+
+Manual / first-time setup:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e "backend/[dev]"      # editable install with pytest/ruff
+cd desktop && npm install
+cp .env.example .env                # then fill in API keys
+```
+
+Backend alone (from repo root, venv active):
+```bash
+uvicorn kinetograph.server:app --host 127.0.0.1 --port 8080 --reload --reload-dir backend/src
+kinetograph run "<prompt>" --project <name>   # headless pipeline via CLI (python -m kinetograph)
+```
+
+Tests / lint / typecheck:
+```bash
+cd backend && pytest                          # all tests (pytest-asyncio)
+cd backend && pytest tests/test_archivist_nemotron.py::<name>   # single test
+cd backend && ruff check src/                 # line-length 100, rules E/F/I/W
+cd desktop && npm run typecheck               # tsc --noEmit
+```
+
+Distribution builds: `cd desktop && npm run build` (add `-- --win` / `-- --linux`); output in `desktop/release/`. Production bundles the backend via PyInstaller — see `desktop/package.json` → `build.extraResources`.
+
+## Backend architecture
+
+The pipeline is a **deterministic sequential LangGraph StateGraph** (`orchestrator.py`), not LLM-routed. Fixed order:
+
+```
+archivist → scripter → human_review → [synthesizer?] → director → captioner → sound_engineer → export → END
+```
+
+- `state.py` — `GraphState` is a `TypedDict` (LangGraph requires TypedDict, not a Pydantic model). List fields use `operator.add` reducers → append semantics. `Phase` is a str-enum; `_normalize_phase` in the orchestrator converts enums to plain strings before checkpoint serialization to avoid LangGraph deserialization warnings.
+- `human_review` uses LangGraph `interrupt()` — the user **must** approve the paper edit before rendering. Approval resumes via `/api/pipeline/approve`.
+- Synthesizer runs only if the approved edit contains clips with `clip_type == "synth"` (Pexels stock B-roll).
+- **Edits** (post-pipeline tweaks) don't re-run the whole graph. `/api/pipeline/edit` calls `_classify_edit()` in `server.py`, a keyword rule-based classifier that picks a `start_from` node: music/audio → `sound_engineer`, captions/text → `captioner`, render/color/quality → `director`, else (content change) → `scripter` (which goes through approval again). The graph is recompiled with that entry point.
+- `agents/` — one module per pipeline node. Note `producer.py` only contains `human_review_node`; the "Producer as LLM orchestrator" description in `README.md` is outdated — there is no LLM routing.
+- `core/` — shared rendering: `compositor.py`'s `FilterGraphBuilder` compiles the whole timeline (trim/concat/xfade/PiP/caption burn-in) into a single `ffmpeg -filter_complex` command; `hwaccel.py` smoke-tests encoders at startup (videotoolbox → nvenc → qsv → vaapi → libx264); `media.py` does ffprobe + processing (all FFmpeg calls are `asyncio.create_subprocess_exec` so the event loop never blocks).
+- `config.py` — `Settings` (pydantic-settings) loads `.env` from repo root; `settings` is an importable singleton. All project paths derive from `_project_root`, which is `KINETOGRAPH_PROJECT_DIR` when set, else repo root.
+- `server.py` (~2100 lines) is the single FastAPI app: pipeline control, asset management (import-by-reference, thumbnails, waveforms, cached ffprobe), and WebSockets. Routes are tagged `System` / `Pipeline` / `Assets`.
+
+## Frontend ↔ backend contract
+
+- `desktop/electron/main.ts` owns the backend lifecycle: spawns the sidecar (skips if `/api/health` already answers, e.g. under `dev.sh`), and switches projects by POSTing `/api/project/set-dir` (the backend re-points all paths live). It also writes API keys from the Settings UI into `.env` (`writeEnvFile`).
+- `desktop/src/lib/api.ts` — `KinetographAPI` (ky-based HTTP client) is the only place REST calls live.
+- Real-time state uses **two** WebSockets: `/ws` for pipeline events, and `/ws/crdt` for the timeline. The timeline is a **CRDT** (Yjs on the frontend, `pycrdt` in `backend/crdt.py`) — the backend Y.Doc is the authoritative copy and persists to `state/crdt_snapshot.yjs`. When editing timeline behavior, changes must round-trip through the CRDT, not plain REST.
+- State stores: `desktop/src/store/use-kinetograph-store.ts` and `use-chat-store.ts` (Zustand).
+
+## Project directory layout
+
+A "project" is any user-chosen directory. Electron scaffolds it (`ensureProjectStructure`): `media/` (imported clips, referenced by path — not copied — via `state/media_refs.json`), `media/.synth/` (Pexels cache), `output/`, `state/` (`project.json` manifest + CRDT snapshot), `.cache/` (thumbnails/waveforms/metadata/conformed-audio — Adobe-style, safe to delete and regenerated on demand).
+
+## Config keys
+
+Required: `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`. Recommended: `NVIDIA_API_KEY` (Nemotron VLM), `PEXELS_API_KEY`. Optional: `SOUNDSTRIPE_API_KEY`, `HF_TOKEN`. Models default to `gemini-2.5-flash-preview-05-20` and `nvidia/nemotron-nano-12b-v2-vl` (overridable via env or the in-app Settings page).

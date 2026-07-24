@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables (contains secrets)
+.env
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Media files (too large for git)
+media/*
+media/.synth/*
+output/*
+!media/.gitkeep
+!output/.gitkeep
+
+# Media cache (thumbnails, waveforms, metadata — regenerated on demand)
+.cache/
+
+# Temp / State files
+*.tmp
+*.log
+state/*.json
+state/*/
+!state/.gitkeep
+
+# Node / Electron
+node_modules/
+desktop/dist/
+desktop/dist-electron/
+desktop/release/
+
+# SQLite checkpoints
+*.db
+*.sqlite
