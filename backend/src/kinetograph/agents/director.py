@@ -63,7 +63,7 @@ def _normalize_one_clip(
     height: int | None = None,
     quality_crf: int | None = None,
 ) -> str:
-    """Normalize a single clip (runs in a worker process). Handles images too."""
+    """Normalize a single clip (runs in a worker thread). Handles images too."""
     if Path(source_path).suffix.lower() in IMAGE_EXTENSIONS:
         normalize_image_to_video(source_path, output_path, width=width, height=height)
     else:
@@ -107,7 +107,6 @@ def _normalize_all_clips(
             continue
 
         if source_path in source_cache:
-            normalized[clip_id] = source_cache[source_path]
             logger.info(f"🎬 Director: Reusing normalized cache for {clip_id}")
             continue
 

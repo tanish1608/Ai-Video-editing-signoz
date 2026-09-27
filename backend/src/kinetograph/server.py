@@ -1914,7 +1914,7 @@ async def upload_asset(file: UploadFile):
     MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB cap (disk-fill guard)
     written = 0
     try:
-        with open(dest, "wb") as f:
+        with open(dest, "xb") as f:
             while True:
                 chunk = await file.read(CHUNK_SIZE)
                 if not chunk:
@@ -1923,6 +1923,8 @@ async def upload_asset(file: UploadFile):
                 if written > MAX_UPLOAD_BYTES:
                     raise ValueError("File exceeds maximum upload size")
                 f.write(chunk)
+    except FileExistsError:
+        raise HTTPException(409, "A file with this name already exists; rename it before uploading")
     except ValueError as exc:
         dest.unlink(missing_ok=True)
         raise HTTPException(413, str(exc))

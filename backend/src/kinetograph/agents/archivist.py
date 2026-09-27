@@ -420,9 +420,21 @@ def _discover_media_files() -> list[dict]:
     all_extensions = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
     files = []
     media_dir = settings.media_dir
-    if not media_dir.exists():
-        return files
-    for f in sorted(media_dir.iterdir()):
+    candidates = list(media_dir.iterdir()) if media_dir.exists() else []
+    # Windows may deny symlink creation. Registered originals are authoritative
+    # even when there is no corresponding link in media/.
+    if settings.media_refs_path.exists():
+        try:
+            refs = json.loads(settings.media_refs_path.read_text())
+            candidates.extend(Path(value) for value in refs.values() if isinstance(value, str))
+        except (OSError, ValueError, AttributeError):
+            logger.warning("Could not read media references", exc_info=True)
+    seen: set[Path] = set()
+    for f in sorted(candidates):
+        resolved = f.resolve()
+        if resolved in seen or not f.is_file():
+            continue
+        seen.add(resolved)
         # Skip hidden files/dirs (including .synth/)
         if f.name.startswith(".") or f.is_dir():
             continue

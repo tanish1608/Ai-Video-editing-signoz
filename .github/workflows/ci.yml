@@ -20,7 +20,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: python -m pytest backend/tests -q
         env:
-          OTEL_SDK_DISABLED: 'true'
+          KINETOGRAPH_TELEMETRY: '0'
   desktop:
     runs-on: ubuntu-latest
     defaults:
