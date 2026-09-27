@@ -528,23 +528,40 @@ function envValue(value: unknown, fallback: string | number = ""): string {
   return String(raw).split(/[\r\n]/)[0];
 }
 
+// Parse KEY=VALUE lines of an existing env file (comments/blank lines ignored).
+function readEnvFile(envPath: string): Map<string, string> {
+  const values = new Map<string, string>();
+  if (!fs.existsSync(envPath)) return values;
+  for (const line of fs.readFileSync(envPath, "utf-8").split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+    if (match) values.set(match[1], match[2]);
+  }
+  return values;
+}
+
 function writeEnvFile(settings: Record<string, unknown>): void {
   const envPath = isDev
     ? path.join(__dirname, "..", "..", ".env")
     : path.join(app.getPath("userData"), ".env");
 
+  // Never let an empty Settings field erase a key already in the file (e.g. a
+  // hand-edited repo .env in dev), and keep variables the app doesn't manage.
+  const existing = readEnvFile(envPath);
+  const secret = (name: string, value: unknown) =>
+    `${name}=${envValue(value) || existing.get(name) || ""}`;
+
   const lines: string[] = [
     "# Kinetograph Configuration (managed by the app)",
     "",
     "# ── AI / LLM Keys ──────────────────────────────────────",
-    `GEMINI_API_KEY=${envValue(settings.geminiApiKey)}`,
-    `HF_TOKEN=${envValue(settings.hfToken)}`,
-    `ELEVENLABS_API_KEY=${envValue(settings.elevenlabsApiKey)}`,
-    `NVIDIA_API_KEY=${envValue(settings.nvidiaApiKey)}`,
+    secret("GEMINI_API_KEY", settings.geminiApiKey),
+    secret("HF_TOKEN", settings.hfToken),
+    secret("ELEVENLABS_API_KEY", settings.elevenlabsApiKey),
+    secret("NVIDIA_API_KEY", settings.nvidiaApiKey),
     "",
     "# ── Stock & Music ──────────────────────────────────────",
-    `PEXELS_API_KEY=${envValue(settings.pexelsApiKey)}`,
-    `SOUNDSTRIPE_API_KEY=${envValue(settings.soundstripeApiKey)}`,
+    secret("PEXELS_API_KEY", settings.pexelsApiKey),
+    secret("SOUNDSTRIPE_API_KEY", settings.soundstripeApiKey),
     "",
     "# ── Model Configuration ───────────────────────────────",
     `GEMINI_MODEL=${envValue(settings.geminiModel, "gemini-3.8-flash")}`,
@@ -560,6 +577,13 @@ function writeEnvFile(settings: Record<string, unknown>): void {
     "API_HOST=127.0.0.1",
     `API_PORT=${BACKEND_PORT}`,
   ];
+
+  const managed = new Set(lines.map((line) => line.split("=")[0]));
+  const preserved = [...existing].filter(([name]) => !managed.has(name));
+  if (preserved.length > 0) {
+    lines.push("", "# ── Other (preserved) ──────────────────────────────────");
+    for (const [name, value] of preserved) lines.push(`${name}=${value}`);
+  }
 
   fs.writeFileSync(envPath, lines.join("\n") + "\n", { mode: 0o600 });
 }
