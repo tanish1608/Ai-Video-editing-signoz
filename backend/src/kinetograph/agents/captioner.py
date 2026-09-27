@@ -1,15 +1,4 @@
-"""
-Agent 6: The Captioner
-───────────────────────
-Generates engaging word-by-word captions for the rendered video.
-
-Uses ElevenLabs word-level timestamps (from the Archivist's transcription)
-mapped to the rendered video's timeline.  Generates ASS subtitles with
-TikTok-style active-word highlighting, then burns them into the video
-via FFmpeg's ``ass`` filter.
-
-Pipeline position: director → **captioner** → sound_engineer → export
-"""
+"""Burn captions from the retained, mastered, caption-free video."""
 
 from __future__ import annotations
 
@@ -26,96 +15,56 @@ logger = logging.getLogger(__name__)
 
 
 async def captioner_node(state: GraphState) -> dict:
-    """
-    LangGraph node — The Captioner.
-
-    1. Generate ASS subtitle file from word-level timestamps
-    2. Burn captions into the rendered video via FFmpeg ass filter
-    """
-    logger.info("📝 Captioner: Starting caption generation...")
-
-    render_path = state.get("render_path")
-    approved_edit = state.get("approved_edit")
-    master_index = state.get("master_index", [])
-    caption_style = state.get("caption_style")  # user-chosen style preset
-
-    if not render_path or not Path(render_path).exists():
+    source = state.get("caption_source_path") or state.get("picture_path")
+    # Old projects must re-render once, rather than burn over existing subtitles.
+    if not source or not Path(source).is_file():
         return {
             "phase": Phase.ERROR,
             "errors": [
                 {
                     "agent": "captioner",
-                    "message": f"Rendered video not found: {render_path}",
-                    "phase": Phase.RENDERED,
-                    "recoverable": False,
+                    "message": "Re-render this project to create a clean caption source.",
+                    "recoverable": True,
                 }
             ],
         }
-
-    if not approved_edit:
-        logger.warning("📝 Captioner: No approved edit — skipping captions")
-        return {"phase": Phase.RENDERED}
-
+    style = state.get("caption_style")
+    if style and style.get("id") == "none":
+        return {"phase": Phase.RENDERED, "render_path": source, "caption_path": None}
     try:
-        render_p = Path(render_path)
-        caption_dir = settings.state_dir / "captions"
-        caption_dir.mkdir(parents=True, exist_ok=True)
-
-        # Step 1: Generate ASS subtitle file
-        ass_path = caption_dir / f"{render_p.stem}_captions.ass"
-
-        # Get actual rendered video duration so caption timestamps
-        # can be scaled to compensate for crossfade transition overlaps
-        video_meta = await probe_media_async(render_path)
-        video_duration_ms = video_meta.get("duration_ms")
-
+        run_id = state.get("run_id", "captions")
+        output_dir = settings.output_dir / "runs" / run_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ass_path = output_dir / "captions.ass"
+        meta = await probe_media_async(source)
         result = await asyncio.to_thread(
             generate_ass_captions,
-            approved_edit=approved_edit,
-            master_index=master_index,
+            approved_edit=state.get("approved_edit") or {},
+            master_index=state.get("master_index", []),
             output_path=ass_path,
-            video_duration_ms=video_duration_ms,
-            style=caption_style,
+            video_duration_ms=meta.get("duration_ms"),
+            width=meta.get("width"),
+            height=meta.get("height"),
+            style=style,
         )
-
         if result is None:
-            logger.warning(
-                "📝 Captioner: No captions generated (no word timestamps?) — passing through"
-            )
-            return {"phase": Phase.RENDERED}
-
-        logger.info(f"📝 Captioner: ✓ ASS file generated → {ass_path}")
-
-        # Step 2: Burn captions into the rendered video.
-        # The director runs BEFORE the captioner in the pipeline, so it
-        # can only burn captions from a *previous* run.  For the current
-        # run (including caption-only edits), we burn here.
-        captioned_path = render_p.parent / f"{render_p.stem}_captioned.mp4"
-        try:
-            await asyncio.to_thread(burn_captions, render_path, ass_path, captioned_path)
-            logger.info(f"📝 Captioner: ✓ Captions burned → {captioned_path}")
-            final_render = str(captioned_path)
-        except Exception as burn_exc:
-            logger.error(f"📝 Captioner: burn_captions failed: {burn_exc}")
-            # Fall back to un-captioned render so pipeline can continue
-            final_render = render_path
-
+            return {"phase": Phase.RENDERED, "render_path": source, "caption_path": None}
+        output = output_dir / "captioned.mp4"
+        await asyncio.to_thread(burn_captions, source, ass_path, output)
         return {
             "phase": Phase.RENDERED,
-            "render_path": final_render,
+            "render_path": str(output),
             "caption_path": str(ass_path),
+            "render_history": [str(output)],
         }
-
     except Exception as exc:
-        logger.error(f"📝 Captioner: Failed: {exc}")
-        # Non-fatal — continue pipeline without captions
+        logger.exception("Caption generation failed")
         return {
-            "phase": Phase.RENDERED,
+            "phase": Phase.ERROR,
             "errors": [
                 {
                     "agent": "captioner",
-                    "message": f"Caption generation failed (non-fatal): {exc}",
-                    "phase": Phase.RENDERED,
+                    "message": f"Caption generation failed: {exc}",
                     "recoverable": True,
                 }
             ],

@@ -54,6 +54,9 @@ export interface ChatMessage {
   renderPath?: string;
   timelinePath?: string;
 
+  // Run log folder (errors / stops) — opened via the "Open run log" button
+  logDir?: string;
+
   // Edit request/response
   editInstruction?: string;
   editType?: EditType;
@@ -87,7 +90,7 @@ export const PHASE_DESCRIPTIONS: Record<Phase, string> = {
   [Phase.IDLE]: "Waiting for input...",
   [Phase.INGESTING]: "📦 Archivist is ingesting your footage — running speech-to-text & visual analysis...",
   [Phase.INDEXED]: "✅ Footage indexed! Master index built with transcripts & scene descriptions.",
-  [Phase.SCRIPTING]: "✍️ Scripter is crafting your paper edit with Mistral AI...",
+  [Phase.SCRIPTING]: "✍️ Scripter is crafting your paper edit with Gemini...",
   [Phase.SCRIPTED]: "📝 Script complete! Paper edit generated.",
   [Phase.AWAITING_APPROVAL]: "⏸️ Ready for your review! Check the timeline below and approve or request changes.",
   [Phase.APPROVED]: "👍 Approved! Continuing pipeline...",
@@ -95,7 +98,7 @@ export const PHASE_DESCRIPTIONS: Record<Phase, string> = {
   [Phase.SYNTHESIZED]: "✅ Stock footage sourced and downloaded.",
   [Phase.NORMALIZING]: "🎞️ Director is normalizing clip formats for assembly...",
   [Phase.NORMALIZED]: "✅ All clips normalized.",
-  [Phase.RENDERING]: "🖥️ Director is rendering the final cut with MoviePy...",
+  [Phase.RENDERING]: "🖥️ Director is rendering the final cut with FFmpeg...",
   [Phase.RENDERED]: "✅ Render complete!",
   [Phase.CAPTIONING]: "📝 Captioner is burning captions into the video...",
   [Phase.MASTERING]: "🔊 Sound Engineer is mastering audio — music, levels, normalization...",

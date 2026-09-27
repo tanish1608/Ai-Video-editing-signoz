@@ -15,8 +15,11 @@ The ASS file is burned into the video via FFmpeg's libass filter.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 from textwrap import dedent
 
@@ -32,7 +35,7 @@ logger = logging.getLogger(__name__)
 _WHITE = "&H00FFFFFF"  # white
 _YELLOW = "&H0000FFFF"  # yellow (highlight colour)
 _OUTLINE = "&H00000000"  # black outline
-_BOX_BG = "&HC0000000"  # semi-transparent black background (C0 = 75% opaque)
+_BOX_BG = "&HC0000000"  # semi-transparent black background (C0 = 75% transparent)
 
 _FONT_NAME = "Arial"
 _FONT_SIZE = 56  # Tuned for 1080px width vertical video
@@ -64,7 +67,7 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 3,
         "position": "bottom",  # bottom | center | top
-        "border_style": 4,  # 4 = opaque box
+        "border_style": 3,  # 3 = opaque box
     },
     "clean-white": {
         "id": "clean-white",
@@ -94,7 +97,7 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 3,
         "position": "bottom",
-        "border_style": 4,
+        "border_style": 3,
     },
     "subtitle-classic": {
         "id": "subtitle-classic",
@@ -109,7 +112,7 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 2,
         "position": "bottom",
-        "border_style": 4,
+        "border_style": 3,
     },
 }
 
@@ -159,22 +162,25 @@ def _ass_header(width: int, height: int, style: dict | None = None) -> str:
     """Generate the ASS file header with script info and styles."""
     s = style or {}
     font_name = s.get("font_name", _FONT_NAME)
-    font_size = s.get("font_size", _FONT_SIZE)
+    scale = min(width, height) / 1080
+    font_size = max(10, round(s.get("font_size", _FONT_SIZE) * scale))
     inactive_color = s.get("inactive_color", _WHITE)
     active_color = s.get("active_color", _YELLOW)
     outline_color = s.get("outline_color", _OUTLINE)
     bg_color = s.get("bg_color", _BOX_BG)
-    outline_size = s.get("outline_size", _OUTLINE_SIZE)
-    border_style = s.get("border_style", 4)
+    outline_size = max(1, s.get("outline_size", _OUTLINE_SIZE) * scale)
+    border_style = s.get("border_style", 3)
     position = s.get("position", "bottom")
     margin_v = {"top": 60, "center": 0, "bottom": _MARGIN_V}.get(position, _MARGIN_V)
+    margin_v = round(margin_v * scale)
+    margin_h = round(_MARGIN_H * scale)
     alignment = {"top": 8, "center": 5, "bottom": 2}.get(position, 2)  # ASS numpad alignment
 
     style_line = (
         f"Style: Default,{font_name},{font_size},{inactive_color},"
         f"{active_color},{outline_color},{bg_color},-1,0,0,0,100,100,1,0,"
-        f"{border_style},{outline_size},{_SHADOW_SIZE},{alignment},{_MARGIN_H},"
-        f"{_MARGIN_H},{margin_v}"
+        f"{border_style},{outline_size},{_SHADOW_SIZE},{alignment},{margin_h},"
+        f"{margin_h},{margin_v}"
     )
     style_format = (
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour,"
@@ -266,6 +272,11 @@ def _group_words(words: list[dict], max_per_group: int = _MAX_WORDS_PER_GROUP) -
 # ─── ASS Dialogue Events ──────────────────────────────────────────────────────
 
 
+def _color_override(color: str) -> str:
+    value = color.replace("&H", "").replace("&", "").zfill(8)
+    return f"\\c&H{value[-6:]}&\\1a&H{value[-8:-6]}&"
+
+
 def _build_events(word_groups: list[list[dict]], style: dict | None = None) -> list[str]:
     """
     Generate ASS dialogue events for each word group.
@@ -314,8 +325,8 @@ def _build_events(word_groups: list[list[dict]], style: dict | None = None) -> l
                 if j == i:
                     # Active word — highlighted colour, slightly scaled up
                     parts.append(
-                        f"{{\\c{active_color}\\fscx110\\fscy110\\b1}}{w_text}"
-                        f"{{\\c{inactive_color}\\fscx100\\fscy100\\b0}}"
+                        f"{{{_color_override(active_color)}\\fscx110\\fscy110\\b1}}{w_text}"
+                        f"{{{_color_override(inactive_color)}\\fscx100\\fscy100\\b1}}"
                     )
                 else:
                     parts.append(w_text)
@@ -348,68 +359,52 @@ def map_words_to_timeline(
 
     Returns a flat list of word dicts with remapped {text, start_ms, end_ms}.
     """
-    clips = approved_edit.get("clips", [])
-    if not clips:
-        return []
-
-    # Build a lookup: source_file → list of words (from master_index)
-    file_words: dict[str, list[dict]] = {}
-    for entry in master_index:
-        src = entry.get("asset_file", "")
-        words = entry.get("words", [])
-        if src and words:
-            if src not in file_words:
-                file_words[src] = []
-            file_words[src].extend(words)
-
-    # Sort each file's words by start_ms
-    for src in file_words:
-        file_words[src].sort(key=lambda w: w.get("start_ms", 0))
-
-    # Walk through clips and remap words
-    remapped_words: list[dict] = []
-    cumulative_offset_ms = 0
-
-    for clip in clips:
-        clip_type = clip.get("clip_type", "")
-        source_file = clip.get("source_file", "")
-        in_ms = clip.get("in_ms", 0)
-        out_ms = clip.get("out_ms", 0)
-        clip_duration_ms = out_ms - in_ms
-
-        if clip_duration_ms <= 0:
-            continue
-
-        # Only primary clips carry dialogue audio
-        if clip_type != "primary":
-            # Cutaway clips are visual only — no words, but still advances the timeline
-            # Actually, cutaway visuals play OVER primary audio, so they don't
-            # advance the timeline independently. Skip them.
-            continue
-
-        # Find words from this source file within [in_ms, out_ms]
-        src_words = file_words.get(source_file, [])
-        for word in src_words:
-            w_start = word.get("start_ms", 0)
-            w_end = word.get("end_ms", 0)
-            w_text = word.get("text", "").strip()
-
-            if not w_text:
+    mapping = approved_edit.get("render_map")
+    if mapping is None:
+        # Draft/legacy fallback. New renders always provide the exact source map.
+        mapping = []
+        offset = 0
+        has_primary = False
+        for clip in approved_edit.get("clips", []):
+            primary = clip.get("clip_type") == "primary"
+            if clip.get("clip_type") == "overlay" or (has_primary and not primary):
                 continue
-
-            # Check if word falls within the clip's range (with some tolerance)
-            if w_start >= in_ms - 50 and w_end <= out_ms + 50:
-                remapped_words.append(
+            duration = clip.get("out_ms", 0) - clip.get("in_ms", 0)
+            if duration <= 0:
+                continue
+            mapping.append(
+                {
+                    "source_file": clip.get("source_file"),
+                    "source_start_ms": clip.get("in_ms", 0),
+                    "source_end_ms": clip.get("out_ms", 0),
+                    "timeline_start_ms": offset,
+                    "has_dialogue": primary,
+                }
+            )
+            offset += duration
+            has_primary |= primary
+    file_words: dict[str, dict[tuple, dict]] = {}
+    for entry in master_index:
+        words = file_words.setdefault(entry.get("asset_file", ""), {})
+        for word in entry.get("words", []):
+            key = (word.get("start_ms", 0), word.get("end_ms", 0), word.get("text", ""))
+            words[key] = word
+    result = []
+    for region in mapping:
+        if not region.get("has_dialogue"):
+            continue
+        start, end = region["source_start_ms"], region["source_end_ms"]
+        for word in file_words.get(region["source_file"], {}).values():
+            ws, we = word.get("start_ms", 0), word.get("end_ms", 0)
+            if start <= ws < we <= end and word.get("text", "").strip():
+                result.append(
                     {
-                        "text": w_text,
-                        "start_ms": cumulative_offset_ms + max(0, w_start - in_ms),
-                        "end_ms": cumulative_offset_ms + max(0, w_end - in_ms),
+                        "text": word["text"].strip(),
+                        "start_ms": region["timeline_start_ms"] + ws - start,
+                        "end_ms": region["timeline_start_ms"] + we - start,
                     }
                 )
-
-        cumulative_offset_ms += clip_duration_ms
-
-    return remapped_words
+    return sorted(result, key=lambda w: w["start_ms"])
 
 
 # ─── Public API ────────────────────────────────────────────────────────────────
@@ -433,10 +428,7 @@ def generate_ass_captions(
     Parameters
     ----------
     video_duration_ms : int, optional
-        The *actual* rendered video duration in milliseconds.  When provided,
-        all mapped timestamps are scaled proportionally so that captions stay
-        in sync even when Cloudinary cross-fade transitions compress the
-        timeline.
+        The actual rendered duration, used only to clip events at the media end.
     style : dict, optional
         Caption style overrides from a preset (font, colors, position, etc.).
 
@@ -456,21 +448,13 @@ def generate_ass_captions(
 
     logger.info(f"📝 Captions: Mapped {len(timeline_words)} words to rendered timeline")
 
-    # ── Scale timestamps to match actual video duration ──────────────
-    # Cloudinary cross-fade transitions overlap segments, so the rendered
-    # video is shorter than the raw primary sum.  Proportionally scale every
-    # timestamp so captions don't drift progressively later.
-    if video_duration_ms and timeline_words:
-        mapped_end_ms = max(w["end_ms"] for w in timeline_words)
-        if mapped_end_ms > 0 and abs(mapped_end_ms - video_duration_ms) > 200:
-            scale = video_duration_ms / mapped_end_ms
-            logger.info(
-                f"📝 Captions: Scaling timeline {mapped_end_ms}ms → "
-                f"{video_duration_ms}ms (×{scale:.4f})"
-            )
-            for w in timeline_words:
-                w["start_ms"] = int(w["start_ms"] * scale)
-                w["end_ms"] = int(w["end_ms"] * scale)
+    # Clip at the media boundary; never stretch speech into trailing silence.
+    if video_duration_ms is not None:
+        timeline_words = [
+            {**w, "end_ms": min(w["end_ms"], video_duration_ms)}
+            for w in timeline_words
+            if w["start_ms"] < video_duration_ms
+        ]
 
     # Group into phrase chunks
     word_groups = _group_words(timeline_words, max_per_group=_MAX_WORDS_PER_GROUP)
@@ -499,19 +483,19 @@ def burn_captions(
     """
     Burn captions into a video using FFmpeg's ``ass`` filter.
 
-    This is kept as a standalone utility for ad-hoc caption burns.
-    In the normal pipeline, the Director merges the ``ass`` filter into
-    its single-pass ``filter_complex`` render, avoiding an extra re-encode.
+    Audio is stream-copied from the clean master so style changes preserve it.
     """
     video_path = str(video_path)
     ass_path_str = str(ass_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    executable = caption_ffmpeg()
     # FFmpeg ass filter needs special chars escaped inside the filtergraph
     escaped = escape_ffmpeg_filter_path(ass_path_str)
     cmd = [
-        "ffmpeg",
+        executable,
+        "-hide_banner",
         "-y",
         "-i",
         video_path,
@@ -532,7 +516,9 @@ def burn_captions(
     logger.info("📝 Captions: Burning via FFmpeg ass filter...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(f"Caption burn failed — FFmpeg ass filter error: {result.stderr[:500]}")
+        raise RuntimeError(
+            f"Caption burn failed — FFmpeg ass filter error: {result.stderr[-1500:]}"
+        )
     logger.info(f"📝 Captions: Burned → {output_path}")
     return output_path
 
@@ -549,3 +535,32 @@ def _ffmpeg_has_filter(name: str) -> bool:
         return f" {name} " in result.stdout or f" {name}\n" in result.stdout
     except Exception:
         return False
+
+
+@lru_cache(maxsize=1)
+def caption_ffmpeg() -> str:
+    """Find a subtitle-capable build without replacing the system FFmpeg."""
+    candidates = [
+        os.environ.get("KINETOGRAPH_CAPTION_FFMPEG"),
+        shutil.which("ffmpeg"),
+        "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+        "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+    ]
+    import imageio_ffmpeg
+
+    candidates.append(imageio_ffmpeg.get_ffmpeg_exe())
+    for candidate in dict.fromkeys(c for c in candidates if c):
+        if not Path(candidate).is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=10
+            )
+            if " ass " in result.stdout:
+                return candidate
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    raise RuntimeError(
+        "Captions require FFmpeg with libass. On macOS install ffmpeg-full; "
+        "or set KINETOGRAPH_CAPTION_FFMPEG to a subtitle-capable FFmpeg executable."
+    )

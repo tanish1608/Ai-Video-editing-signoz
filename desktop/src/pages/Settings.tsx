@@ -38,7 +38,7 @@ const DEFAULT_SETTINGS: SettingsState = {
 
 const API_KEY_FIELDS: { key: keyof SettingsState; label: string; description: string; required: boolean }[] = [
   { key: "geminiApiKey", label: "Gemini API Key", description: "Google AI Studio — powers the Scripter and music vibe picker", required: true },
-  { key: "elevenlabsApiKey", label: "ElevenLabs API Key", description: "Speech-to-text transcription (Scribe v2)", required: true },
+  { key: "elevenlabsApiKey", label: "ElevenLabs API Key", description: "Transcription, instrumental music and sound effects", required: true },
   { key: "nvidiaApiKey", label: "NVIDIA API Key", description: "Vision-Language Model for visual scene analysis", required: true },
   { key: "pexelsApiKey", label: "Pexels API Key", description: "Stock footage for B-roll synthesis", required: false },
   { key: "soundstripeApiKey", label: "Soundstripe API Key", description: "Background music search and download", required: false },

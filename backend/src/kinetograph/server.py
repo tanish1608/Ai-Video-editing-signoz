@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from kinetograph import __version__
+from kinetograph import __version__, runlog
 from kinetograph import crdt as crdt_mod
 from kinetograph.config import settings
 from kinetograph.core.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, probe_media
@@ -212,7 +212,6 @@ class PipelineSession:
     websockets: list[WebSocket] = field(default_factory=list)
     _running_task: asyncio.Task | None = field(default=None)
     # Caption style gate — pipeline waits here until user picks a style
-    _caption_style_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class SessionManager:
@@ -332,6 +331,62 @@ async def _restore_persisted_session() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+from kinetograph.core.editing_options import (  # noqa: E402
+    EditingOptions,
+    caption_style,
+    load_options,
+    pipeline_options,
+    save_options,
+)
+
+
+@app.get("/api/project/editing-options", tags=["Project"])
+async def get_editing_options():
+    return load_options().model_dump()
+
+
+@app.put("/api/project/editing-options", tags=["Project"])
+async def update_editing_options(request: EditingOptions):
+    active = sessions.active
+    if active and active._running_task and not active._running_task.done():
+        raise HTTPException(409, "Wait for the current edit to finish before changing options.")
+    try:
+        caption_style(request.caption_style_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    save_options(request)
+    return request.model_dump()
+
+
+_pipeline_start_lock = asyncio.Lock()
+
+
+def _serialize_start(function):
+    """Reserve startup while checkpoint I/O yields, before a running task exists."""
+    from functools import wraps
+
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        if _pipeline_start_lock.locked():
+            raise HTTPException(409, "A pipeline job is starting. Wait for it to finish.")
+        async with _pipeline_start_lock:
+            return await function(*args, **kwargs)
+
+    return wrapped
+
+
+def _require_gemini_key() -> None:
+    """Fail fast (before any work) when the Scripter/Critic would have no Gemini key."""
+    settings.reload_secrets()
+    if not settings.gemini_api_key:
+        raise HTTPException(
+            412,
+            "Gemini API key is not configured. Open Settings → API Keys, paste your "
+            "Gemini key and click Save, then try again. "
+            f"(The engine reads keys from {settings.model_config.get('env_file')})",
+        )
+
+
 class RunRequest(BaseModel):
     prompt: str = Field(
         ..., min_length=1, max_length=10_000, description="Natural language creative brief"
@@ -364,19 +419,21 @@ class EditInstructionRequest(BaseModel):
             "Natural language edit instruction (e.g., 'change the music to something upbeat')"
         ),
     )
-    edit_type: Optional[Literal["rescript", "resynthesize", "rerender", "audio", "general"]] = (
-        Field(
-            None,
-            description=(
-                "Hint: 'rescript', 'resynthesize', 'rerender', 'audio', or "
-                "'general'. Auto-detected if omitted."
-            ),
-        )
+    edit_type: Optional[
+        Literal["rescript", "resynthesize", "rerender", "audio", "captions", "general"]
+    ] = Field(
+        None,
+        description=(
+            "Hint: 'rescript', 'resynthesize', 'rerender', 'audio', or "
+            "'general'. Auto-detected if omitted."
+        ),
     )
 
 
 class CaptionStyleRequest(BaseModel):
     """User's chosen caption style for the Captioner agent."""
+
+    apply: bool = False
 
     style_id: str = Field(
         ...,
@@ -453,11 +510,6 @@ async def _broadcast(event: dict):
         sessions.remove_global_ws(ws)
 
 
-# Module-level caption style preference — persists across pipeline sessions.
-# Set by POST /api/pipeline/caption-style (no active session required).
-_selected_caption_style_id: str = "bold-yellow"
-
-
 # ─── Timeline Extras (V2 overlays, music — not in CRDT) ──────────────────────
 
 _timeline_extras: dict = {}  # in-memory cache of the latest extras
@@ -496,19 +548,6 @@ def _load_timeline_extras() -> dict:
     return _timeline_extras
 
 
-def _ensure_caption_style(session: "PipelineSession") -> None:
-    """Auto-set default caption style if none is set yet."""
-    if not session.pipeline_state.get("caption_style"):
-        from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-
-        style = (
-            CAPTION_STYLE_PRESETS.get(_selected_caption_style_id)
-            or CAPTION_STYLE_PRESETS["bold-yellow"]
-        )
-        session.pipeline_state["caption_style"] = style
-        logger.info("🎨 Auto-selected caption style: %s", _selected_caption_style_id)
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH & INFO
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -538,6 +577,7 @@ async def health_check():
 @app.get("/api/config", tags=["System"])
 async def get_config():
     """Get current project configuration (resolution, fps, etc.)."""
+    settings.reload_secrets()
     return {
         "output_width": settings.output_width,
         "output_height": settings.output_height,
@@ -547,6 +587,7 @@ async def get_config():
         "keyframe_interval": settings.keyframe_interval,
         "vlm_model": settings.vlm_model,
         "gemini_model": settings.gemini_model,
+        "api_keys": runlog.key_status(),
         "color_grade": _color_grade,
         "project_dir": str(settings._project_root),
     }
@@ -713,6 +754,7 @@ _QUALITY_CRF = {"high": "18", "medium": "23", "low": "28"}
 
 
 @app.post("/api/render", tags=["Pipeline"])
+@_serialize_start
 async def start_render(request: RenderRequest):
     """
     Re-render the current project with custom resolution and quality.
@@ -731,6 +773,7 @@ async def start_render(request: RenderRequest):
     if not approved:
         raise HTTPException(400, "No paper edit — run the pipeline first.")
 
+    approved = {**(ps.get("approved_edit") or ps.get("paper_edit") or {}), **approved}
     normalized = ps.get("normalized_clips", {})
     if not normalized:
         raise HTTPException(400, "No normalized clips — run the pipeline first.")
@@ -742,8 +785,10 @@ async def start_render(request: RenderRequest):
     # captions, mastering, and OTIO export must process the new artifact too.
     from kinetograph.orchestrator import compile_graph
 
+    settings.reload_secrets()
     run_id = uuid.uuid4().hex
     render_state = dict(ps)
+    render_state.update(pipeline_options())
     render_state.update(
         {
             "phase": Phase.IDLE,
@@ -772,7 +817,7 @@ async def start_render(request: RenderRequest):
     return {
         "status": "started",
         "message": f"Re-rendering at {request.width}×{request.height} "
-        "({request.quality}). Listen on WebSocket for updates.",
+        f"({request.quality}). Listen on WebSocket for updates.",
     }
 
 
@@ -818,6 +863,7 @@ async def get_pipeline_status():
 
 
 @app.post("/api/pipeline/run", tags=["Pipeline"])
+@_serialize_start
 async def run_pipeline(request: RunRequest):
     """
     Start a new pipeline run.
@@ -833,6 +879,7 @@ async def run_pipeline(request: RunRequest):
     active = sessions.active
     if active and active._running_task and not active._running_task.done():
         raise HTTPException(409, "Pipeline already running. Wait for it to finish.")
+    _require_gemini_key()
     try:
         session = sessions.create()
     except RuntimeError as exc:
@@ -841,6 +888,7 @@ async def run_pipeline(request: RunRequest):
     session.graph_start = "archivist"
 
     initial_state = {
+        **pipeline_options(),
         "phase": Phase.IDLE,
         "user_prompt": request.prompt,
         "project_name": request.project_name,
@@ -884,7 +932,7 @@ async def run_pipeline(request: RunRequest):
 # handled specially inside _stream_pipeline.
 _DETERMINISTIC_NEXT: dict[str, str] = {
     "archivist": "scripter",
-    "scripter": "human_review",
+    "scripter": "critic",
     # human_review → handled by conditional check (scripter or synthesizer/director)
     "synthesizer": "director",
     "director": "captioner",
@@ -896,10 +944,31 @@ _DETERMINISTIC_NEXT: dict[str, str] = {
 async def _stream_pipeline(session: "PipelineSession", input_data, first_node: str | None = None):
     """Unified background coroutine — streams LangGraph events and broadcasts via WS.
 
-    Used by all three pipeline flows (run, approve, edit).  The pipeline is
+    Used by every pipeline flow (run, approve, edit, render).  The pipeline is
     deterministic-sequential, so we know which node comes next and can
-    broadcast its starting phase proactively.
+    broadcast its starting phase proactively.  Each call is recorded in the
+    run's log folder (see kinetograph.runlog).
     """
+    ps = session.pipeline_state
+    run_log = runlog.RunLog(ps.get("run_id") or session.thread_id)
+    run_log.start(
+        thread_id=session.thread_id,
+        project_name=ps.get("project_name"),
+        prompt=ps.get("user_prompt"),
+        edit_instruction=ps.get("edit_instruction"),
+        start_from=first_node or "resume",
+    )
+    with run_log.capture():
+        await _stream_pipeline_logged(session, input_data, first_node, run_log)
+
+
+async def _stream_pipeline_logged(
+    session: "PipelineSession",
+    input_data,
+    first_node: str | None,
+    run_log: runlog.RunLog,
+):
+    log_dir = str(run_log.dir)
     try:
         if first_node:
             await _broadcast_starting_phase(first_node)
@@ -913,6 +982,7 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
                 _persist_session(session)
                 phase = update.get("phase", "")
                 phase_str = _phase_val(phase)
+                run_log.node_done(node_name, phase_str, update.get("errors", []))
                 await _broadcast(
                     {
                         "type": "phase_update",
@@ -922,10 +992,6 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
                         "errors": update.get("errors", []),
                     }
                 )
-
-                # Auto-set default caption style after director completes
-                if node_name == "director" and phase_str != "error":
-                    _ensure_caption_style(session)
 
                 # Broadcast starting phase for the next node in the sequence
                 if phase_str != "error":
@@ -943,6 +1009,7 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
             if pe:
                 crdt_mod.load_paper_edit(pe)
             _persist_session(session)
+            run_log.finish("awaiting_approval")
             await _broadcast(
                 {
                     "type": "awaiting_approval",
@@ -968,6 +1035,9 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
             music_path=session.pipeline_state.get("music_path"),
         )
         _persist_session(session)
+        run_log.finish(
+            final_phase or "complete", render_path=session.pipeline_state.get("render_path")
+        )
 
         await _broadcast(
             {
@@ -977,13 +1047,24 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
                 "timeline_path": session.pipeline_state.get("timeline_path"),
                 "music_path": session.pipeline_state.get("music_path"),
                 "overlay_clips": session.pipeline_state.get("overlay_clips", []),
+                "log_dir": log_dir,
             }
         )
+
+    except asyncio.CancelledError:
+        # Raised into the task by /api/pipeline/stop (or server shutdown).
+        # Swallowed deliberately so the task ends cleanly and clients are told.
+        logger.info("Pipeline stopped by user")
+        session.pipeline_state["phase"] = Phase.IDLE
+        _persist_session(session)
+        run_log.finish("cancelled")
+        await _broadcast({"type": "pipeline_stopped", "log_dir": log_dir})
 
     except Exception as exc:
         logger.error(f"Pipeline error: {exc}", exc_info=True)
         session.pipeline_state["phase"] = Phase.ERROR
         _persist_session(session)
+        run_log.finish("error", error=str(exc))
         await _broadcast(
             {
                 "type": "phase_update",
@@ -1007,11 +1088,13 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
                 "phase": "error",
                 "render_path": session.pipeline_state.get("render_path"),
                 "timeline_path": session.pipeline_state.get("timeline_path"),
+                "log_dir": log_dir,
             }
         )
 
 
 @app.post("/api/pipeline/approve", tags=["Pipeline"])
+@_serialize_start
 async def approve_pipeline(request: ApprovalRequest):
     """
     Approve or reject the Paper Edit and resume the pipeline.
@@ -1036,6 +1119,7 @@ async def approve_pipeline(request: ApprovalRequest):
     # Fire-and-forget: resume pipeline in background
     if session._running_task and not session._running_task.done():
         raise HTTPException(409, "Pipeline already running. Wait for it to finish.")
+    settings.reload_secrets()
     session._running_task = asyncio.create_task(_stream_pipeline(session, Command(resume=decision)))
 
     return {
@@ -1044,6 +1128,39 @@ async def approve_pipeline(request: ApprovalRequest):
         "message": f"Pipeline resumed with action='{request.action}'. "
         "Listen on WebSocket for updates.",
     }
+
+
+@app.post("/api/pipeline/stop", tags=["Pipeline"])
+async def stop_pipeline():
+    """Stop the running pipeline task (run, resume, edit or render).
+
+    Cancels the background task; in-flight async FFmpeg subprocesses are killed.
+    Clients receive a ``pipeline_stopped`` WebSocket event. Idempotent.
+    """
+    session = sessions.active
+    task = session._running_task if session else None
+    if task is None or task.done():
+        return {"status": "not_running"}
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=15)
+    return {"status": "stopped" if done else "stopping"}
+
+
+@app.get("/api/runs", tags=["Runs"])
+async def list_runs(limit: int = Query(50, ge=1, le=500)):
+    """Summaries of past pipeline runs in the active project, newest first."""
+    return {"runs": runlog.list_runs(limit)}
+
+
+@app.get("/api/runs/{run_id}", tags=["Runs"])
+async def get_run(run_id: str, tail: int = Query(200, ge=0, le=5000)):
+    """One run's summary, event timeline and the tail of its backend.log."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", run_id):
+        raise HTTPException(400, "Invalid run id")
+    run = runlog.read_run(run_id, tail)
+    if run is None:
+        raise HTTPException(404, f"No log for run {run_id}")
+    return run
 
 
 # ── Node → "in-progress" phase mapping for synthetic WS broadcasts ────────────
@@ -1076,39 +1193,6 @@ async def _broadcast_starting_phase(node_name: str) -> None:
                 "errors": [],
             }
         )
-
-
-async def _wait_for_caption_style(session: "PipelineSession", timeout: float = 300) -> None:
-    """Broadcast caption style options and wait for user to pick one.
-
-    Called between director completion and captioner start.  If the user
-    has already chosen a style (edit pipeline re-run), this returns
-    immediately.
-    """
-    # If a style was already set (e.g. re-run), skip the gate
-    if session.pipeline_state.get("caption_style"):
-        return
-
-    from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-
-    # Reset the event in case of prior runs
-    session._caption_style_event.clear()
-
-    # Broadcast the options so the frontend can show a picker
-    await _broadcast(
-        {
-            "type": "caption_style_options",
-            "styles": list(CAPTION_STYLE_PRESETS.values()),
-        }
-    )
-
-    logger.info("🎨 Waiting for user to pick a caption style...")
-    try:
-        await asyncio.wait_for(session._caption_style_event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        # Default to bold-yellow if user doesn't respond
-        logger.warning("🎨 Caption style timeout — using default 'bold-yellow'")
-        session.pipeline_state["caption_style"] = CAPTION_STYLE_PRESETS["bold-yellow"]
 
 
 # ─── POST-PIPELINE EDIT (Deterministic) ────────────────────────────────────────
@@ -1176,6 +1260,7 @@ def _classify_edit(instruction: str) -> str:
 
 
 @app.post("/api/pipeline/edit", tags=["Pipeline"])
+@_serialize_start
 async def edit_pipeline(request: EditInstructionRequest):
     """
     Post-pipeline edit endpoint.
@@ -1201,8 +1286,25 @@ async def edit_pipeline(request: EditInstructionRequest):
     from kinetograph.orchestrator import compile_graph
 
     # Classify the edit to determine starting agent
-    start_from = _classify_edit(request.instruction)
+    explicit = {
+        "rescript": "scripter",
+        "resynthesize": "synthesizer",
+        "rerender": "director",
+        "audio": "sound_engineer",
+        "captions": "captioner",
+    }
+    start_from = explicit.get(request.edit_type) or _classify_edit(request.instruction)
+    # Legacy renders have no clean baseline; rebuild once before changing sound/text.
+    baseline = "caption_source_path" if start_from == "captioner" else "picture_path"
+    if start_from in {"captioner", "sound_engineer"} and not (
+        session.pipeline_state.get(baseline) and Path(session.pipeline_state[baseline]).is_file()
+    ):
+        start_from = "director"
     logger.info("Edit classified: '%s' → start_from=%s", request.instruction[:80], start_from)
+    if start_from == "scripter":
+        _require_gemini_key()
+    else:
+        settings.reload_secrets()
 
     # Build edit state from current pipeline state
     original_prompt = session.pipeline_state.get("user_prompt", "")
@@ -1224,12 +1326,10 @@ async def edit_pipeline(request: EditInstructionRequest):
         else None
     )
 
-    # Inject the user's chosen caption style (stored at module level)
-    from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-
-    edit_state["caption_style"] = CAPTION_STYLE_PRESETS.get(
-        _selected_caption_style_id, CAPTION_STYLE_PRESETS["bold-yellow"]
-    )
+    edit_state.update(pipeline_options())
+    if start_from == "sound_engineer":
+        # An explicit music edit requests a new composition, never another music layer.
+        edit_state["music_path"] = None
 
     # Compile a new graph starting from the classified agent
     graph = compile_graph(start_from=start_from, checkpointer=await _project_checkpointer())
@@ -1239,6 +1339,7 @@ async def edit_pipeline(request: EditInstructionRequest):
     session.graph = graph
     session.config = config
     session.graph_start = start_from
+    session.pipeline_state = edit_state
     _persist_session(session)
 
     # Broadcast pipeline_started so the frontend clears the old rendered video
@@ -1264,40 +1365,44 @@ async def get_caption_styles():
     """Return all available caption style presets."""
     from kinetograph.core.captions import CAPTION_STYLE_PRESETS
 
-    return {"styles": list(CAPTION_STYLE_PRESETS.values())}
+    return {
+        "styles": list(CAPTION_STYLE_PRESETS.values()),
+        "selected_style_id": load_options().caption_style_id,
+    }
 
 
 @app.post("/api/pipeline/caption-style", tags=["Pipeline"])
 async def select_caption_style(request: CaptionStyleRequest):
-    """
-    Select a caption style preset.
-
-    Called by the frontend when the user picks a style from the caption
-    style picker card.  The choice is stored at module level so it
-    persists across pipeline sessions — no active session required.
-    If a session IS active, also inject the style into its state.
-    """
-    global _selected_caption_style_id
-    from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-
-    style = CAPTION_STYLE_PRESETS.get(request.style_id)
-    if not style:
-        raise HTTPException(
-            400,
-            f"Unknown style: {request.style_id}. Available: {list(CAPTION_STYLE_PRESETS.keys())}",
-        )
-
-    _selected_caption_style_id = request.style_id
-
-    # If a session is already running, inject the style into its state too
+    """Persist a project preference and optionally apply it in a single request."""
+    try:
+        style = caption_style(request.style_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     session = sessions.active
-    if session is not None:
+    if _pipeline_start_lock.locked() or (
+        session and session._running_task and not session._running_task.done()
+    ):
+        raise HTTPException(409, "Wait for the current edit to finish before changing captions.")
+    if request.apply and (not session or not session.pipeline_state.get("render_path")):
+        raise HTTPException(409, "Render a video before applying captions.")
+    options = load_options()
+    options.caption_style_id = request.style_id
+    save_options(options)
+    if request.apply:
+        await edit_pipeline(
+            EditInstructionRequest(
+                instruction=f"Apply caption style {request.style_id}",
+                edit_type="captions",
+            )
+        )
+    elif session:
         session.pipeline_state["caption_style"] = style
-        session._caption_style_event.set()
-
-    logger.info(f"🎨 Caption style selected: {request.style_id}")
-
-    return {"status": "ok", "style_id": request.style_id, "style_name": style["name"]}
+        _persist_session(session)
+    return {
+        "status": "started" if request.apply else "ok",
+        "style_id": request.style_id,
+        "style_name": style["name"],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2431,30 +2536,13 @@ async def websocket_endpoint(ws: WebSocket):
                 "type": "connected",
                 "phase": _phase_val(s.pipeline_state.get("phase", Phase.IDLE) if s else Phase.IDLE),
                 "version": __version__,
+                "render_path": s.pipeline_state.get("render_path") if s else None,
                 "overlay_clips": extras.get("overlay_clips", []),
                 "music_path": extras.get("music_path"),
             },
             default=_json_default,
         )
     )
-
-    # If the pipeline is currently waiting for a caption style pick, re-send
-    # the caption_style_options event so reconnected clients see the picker.
-    if s and not s.pipeline_state.get("caption_style") and not s._caption_style_event.is_set():
-        from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-
-        try:
-            await ws.send_text(
-                json.dumps(
-                    {
-                        "type": "caption_style_options",
-                        "styles": list(CAPTION_STYLE_PRESETS.values()),
-                    },
-                    default=_json_default,
-                )
-            )
-        except Exception:
-            pass
 
     try:
         while True:

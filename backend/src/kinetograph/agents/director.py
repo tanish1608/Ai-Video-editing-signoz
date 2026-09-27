@@ -29,7 +29,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kinetograph.config import settings
-from kinetograph.core.compositor import FilterGraphBuilder, SegmentResult
+from kinetograph.core.compositor import (
+    FilterGraphBuilder,
+    SegmentResult,
+    _compute_clean_ranges,
+    segment_overlaps,
+)
 from kinetograph.core.compositor import render as render_fg
 from kinetograph.core.media import (
     IMAGE_EXTENSIONS,
@@ -164,6 +169,8 @@ def _group_into_segments(clips_spec: list[dict]) -> list[dict]:
     current_segment = None
 
     for clip in clips_spec:
+        if clip.get("clip_type") == "overlay":
+            continue
         if clip.get("clip_type") == "primary":
             if current_segment is not None:
                 segments.append(current_segment)
@@ -506,6 +513,7 @@ async def director_node(state: GraphState) -> dict:
 
     segment_results: list[SegmentResult] = []
     errors: list[dict] = []
+    built_segments = []
 
     for i, segment in enumerate(segments):
         primary_id = segment["primary"]["clip_id"] if segment["primary"] else "standalone"
@@ -520,6 +528,7 @@ async def director_node(state: GraphState) -> dict:
         )
         if result:
             segment_results.append(result)
+            built_segments.append(segment)
         else:
             errors.append(
                 {
@@ -529,6 +538,9 @@ async def director_node(state: GraphState) -> dict:
                     "recoverable": True,
                 }
             )
+
+    if errors:
+        return {"phase": Phase.ERROR, "errors": errors}
 
     if not segment_results:
         return {
@@ -543,14 +555,54 @@ async def director_node(state: GraphState) -> dict:
             ],
         }
 
-    # Step 4: Chain segments with crossfade transitions
-    logger.info(f"🎬 Director: Chaining {len(segment_results)} segments (FFmpeg xfade)...")
-
+    # Respect the incoming clip's transition; dialogue defaults to a hard cut.
+    transitions = []
+    for segment in built_segments[1:]:
+        clip = segment["primary"] or segment["cutaways"][0]
+        transitions.append(
+            clip.get("transition_duration_ms", 200) / 1000
+            if clip.get("transition") == "crossfade"
+            else 0.0
+        )
+    overlaps = segment_overlaps(segment_results, transitions=transitions)
     final_v, final_a, total_dur = fg.chain_segments(
         segment_results,
-        crossfade_dur=_CROSSFADE_SEC,
-        bookend_fade=_BOOKEND_FADE_SEC,
+        transitions=overlaps,
+        bookend_fade=0.0,
     )
+    render_map = []
+    offset = 0.0
+    for i, (segment, result) in enumerate(zip(built_segments, segment_results)):
+        if i:
+            offset -= overlaps[i - 1]
+        clip = segment["primary"] or segment["cutaways"][0]
+        ranges = _compute_clean_ranges(
+            max(0, clip["in_ms"] / 1000),
+            clip["out_ms"] / 1000,
+            _get_skip_regions(clip, master_index) if segment["primary"] else [],
+        )
+        local = 0.0
+        for start, end in ranges:
+            duration = min(end - start, result.duration - local)
+            if duration <= 0:
+                break
+            render_map.append(
+                {
+                    "clip_id": clip["clip_id"],
+                    "source_file": clip.get("source_file", ""),
+                    "source_start_ms": round(start * 1000),
+                    "source_end_ms": round((start + duration) * 1000),
+                    "timeline_start_ms": round((offset + local) * 1000),
+                    "has_dialogue": segment["primary"] is not None,
+                }
+            )
+            local += duration
+        offset += result.duration
+    approved_edit = {
+        **approved_edit,
+        "render_map": render_map,
+        "total_duration_ms": round(total_dur * 1000),
+    }
 
     # Step 5: PiP overlays
     overlay_clips = state.get("overlay_clips", []) or approved_edit.get("overlay_clips", [])
@@ -592,24 +644,13 @@ async def director_node(state: GraphState) -> dict:
 
         logger.info(f"🎬 Director: ✓ Render complete → {output_path}")
 
-        # Update paper_edit transitions to reflect the crossfades we applied
-        if len(segment_results) > 1:
-            seg_boundary_ids = set()
-            for i, seg in enumerate(segments):
-                if i > 0 and seg["primary"] is not None:
-                    seg_boundary_ids.add(seg["primary"]["clip_id"])
-            default_crossfade_ms = int(_CROSSFADE_SEC * 1000)
-            for clip in clips_spec:
-                if clip["clip_id"] in seg_boundary_ids:
-                    if not clip.get("transition") or clip["transition"] == "cut":
-                        clip["transition"] = "crossfade"
-                    if not clip.get("transition_duration_ms"):
-                        clip["transition_duration_ms"] = default_crossfade_ms
-
         result_state: dict = {
             "phase": Phase.RENDERED,
             "normalized_clips": normalized,
             "render_path": str(output_path),
+            "picture_path": str(output_path),
+            "caption_source_path": None,
+            "caption_path": None,
             "render_history": [str(output_path)],
             "approved_edit": approved_edit,
         }

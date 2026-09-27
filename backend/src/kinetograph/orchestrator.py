@@ -256,7 +256,7 @@ def build_graph(start_from: str = "archivist") -> StateGraph:
     builder.add_conditional_edges("archivist", _route_after_archivist)
 
     # scripter → critic (editorial QA reviews every fresh/ revised edit)
-    builder.add_edge("scripter", "critic")
+    builder.add_conditional_edges("scripter", _route_on_error("critic"))
 
     # critic → scripter (revise, bounded) | human_review (proceed)
     # This is the visible multi-agent handoff: Scripter → Critic → Scripter → human.
@@ -268,12 +268,12 @@ def build_graph(start_from: str = "archivist") -> StateGraph:
     # synthesizer → director (or error)
     builder.add_conditional_edges("synthesizer", _route_on_error("director"))
 
-    # director → captioner → sound_engineer → export → END
+    # director → sound_engineer → captioner → export → END
     # Each edge is conditional so a Phase.ERROR from any render-stage agent is
     # routed to the error_handler instead of silently continuing to success.
-    builder.add_conditional_edges("director", _route_on_error("captioner"))
-    builder.add_conditional_edges("captioner", _route_on_error("sound_engineer"))
-    builder.add_conditional_edges("sound_engineer", _route_on_error("export"))
+    builder.add_conditional_edges("director", _route_on_error("sound_engineer"))
+    builder.add_conditional_edges("captioner", _route_on_error("export"))
+    builder.add_conditional_edges("sound_engineer", _route_on_error("captioner"))
     builder.add_conditional_edges("export", _route_on_error(END))
 
     # error handler terminates

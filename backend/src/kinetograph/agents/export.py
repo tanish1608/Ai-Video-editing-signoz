@@ -60,7 +60,7 @@ async def export_node(state: GraphState) -> dict:
         clip_paths = {}
         for clip in approved_edit.get("clips", []):
             cid = clip["clip_id"]
-            if cid in normalized_clips:
+            if cid in normalized_clips and Path(normalized_clips[cid]).is_file():
                 clip_paths[cid] = normalized_clips[cid]
             else:
                 clip_paths[cid] = clip.get("source_file", "")
@@ -83,33 +83,8 @@ async def export_node(state: GraphState) -> dict:
         logger.info(f"   🎬 Video:    {render_path}")
         logger.info(f"   📋 Timeline: {otio_path}")
 
-        # Clean up *intermediate* MP4s from the output directory. Only remove
-        # files whose name carries a known pipeline-stage marker — never an
-        # arbitrary .mp4, so a user's earlier final renders are preserved.
-        if render_path:
-            final_render = Path(render_path).resolve()
-            _INTERMEDIATE_MARKERS = (
-                "_captioned",
-                "_mixed",
-                "_denoised",
-                "_normalized",
-                "_master",
-                "_raw",
-                "_temp",
-                "_render",
-            )
-            for f in final_render.parent.iterdir():
-                if (
-                    f.suffix.lower() == ".mp4"
-                    and f.resolve() != final_render
-                    and not f.name.startswith(".")
-                    and any(marker in f.stem for marker in _INTERMEDIATE_MARKERS)
-                ):
-                    try:
-                        f.unlink()
-                        logger.info(f"📦 Export: Removed intermediate: {f.name}")
-                    except OSError:
-                        pass
+        # Retain clean picture/audio baselines for reversible caption and sound edits.
+        # Filename heuristics cannot distinguish intermediates from user exports.
 
         return {
             "phase": Phase.COMPLETE,

@@ -32,21 +32,21 @@ CRITIC_MAX_ITERATIONS = 2  # max Scripter→Critic revise cycles
 
 
 CRITIC_SYSTEM_PROMPT = """You are a ruthless but fair EDITORIAL QA reviewer for short-form
-vertical (9:16) video. \
+video in the selected project mode. \
 An editor has produced a "paper edit" (an ordered list of clips) from a creative brief and
 available footage. \
 Your job is to critique it against professional standards and the brief, and decide whether it
 needs revision.
 
 REVIEW CRITERIA (score each mentally, then give an overall 0-10):
-1. HOOK — Do the first 3-5 seconds grab attention? A weak opening is a BLOCKER.
+1. OPENING — Does the first shot/thought orient the viewer and serve the chosen tone?
 2. BRIEF ALIGNMENT — Does the edit actually deliver what the brief asked for (topic, length, tone)?
-3. NARRATIVE ARC — Is there a clear Hook → Body → Conclusion? Do clips build on each other?
-4. PACING — Does it alternate talking-heads and cutaways for energy? Any dead stretches?
+3. PROGRESSION — Narration needs a coherent thought and payoff; highlights need a visual arc.
+4. PACING — Does shot duration suit the brief? Avoid redundant shots and forced alternation.
 5. CUTAWAY RELEVANCE — Do cutaways semantically match what's being said underneath them?
-6. DURATION — Does total primary-clip duration land within ±15% of the requested length?
+6. DURATION — Does rendered duration land within ±15% of the requested length?
 7. TECHNICAL SANITY — Valid clip types, no obviously broken in/out points, cutaways not longer
-than the primary they cover.
+than the primary they cover. Check source evidence: no fabricated quotes or changed meanings.
 
 SEVERITY:
 - "blocker": must be fixed before rendering (weak hook, wrong length, irrelevant cutaways, broken
@@ -67,6 +67,7 @@ def _condense_edit_for_review(paper_edit: dict) -> dict:
             {
                 "clip_id": c.get("clip_id"),
                 "clip_type": c.get("clip_type"),
+                "source_file": c.get("source_file"),
                 "in_ms": c.get("in_ms"),
                 "out_ms": c.get("out_ms"),
                 "duration_ms": (c.get("out_ms", 0) - c.get("in_ms", 0)),
@@ -104,7 +105,23 @@ async def critic_node(state: GraphState) -> dict:
     user_prompt = state.get("user_prompt", "")
     review_payload = _condense_edit_for_review(paper_edit)
 
+    evidence = [
+        {
+            key: entry.get(key)
+            for key in (
+                "asset_file",
+                "start_ms",
+                "end_ms",
+                "transcript",
+                "visual_descriptions",
+            )
+        }
+        for entry in state.get("master_index", [])
+    ]
     user_message = (
+        f"EDITING MODE: {state.get('editing_mode', 'narration')}\n"
+        "Judge highlights by visual progression, not a mandatory spoken hook.\n"
+        f"SOURCE EVIDENCE: {json.dumps(evidence, default=str)}\n"
         f"CREATIVE BRIEF:\n{user_prompt}\n\n"
         f"PAPER EDIT UNDER REVIEW:\n{json.dumps(review_payload, indent=2)}\n\n"
         f"This is review iteration {iteration} of at most {CRITIC_MAX_ITERATIONS}. "

@@ -95,7 +95,7 @@ async def human_review_node(state: GraphState) -> dict:
             }
 
         # Approve (possibly with user-edited paper_edit from the timeline)
-        approved = decision.get("paper_edit", paper_edit)
+        approved = {**paper_edit, **decision.get("paper_edit", {})}
         logger.info(
             "Human Review: APPROVED — %d clips",
             len(approved.get("clips", [])),

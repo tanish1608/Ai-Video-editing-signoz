@@ -275,11 +275,12 @@ export interface OutputResponse {
 }
 
 export type WSEvent =
-  | { type: 'connected'; phase: Phase; version: string; overlay_clips?: Record<string, unknown>[]; music_path?: string }
+  | { type: 'connected'; phase: Phase; version: string; render_path?: string; overlay_clips?: Record<string, unknown>[]; music_path?: string }
   | { type: 'pipeline_started'; thread_id: string }
   | { type: 'phase_update'; node: string; phase: Phase; timestamp: string; errors: PipelineError[] }
   | { type: 'awaiting_approval'; paper_edit: PaperEdit }
-  | { type: 'pipeline_complete'; phase: Phase; render_path?: string; timeline_path?: string; music_path?: string; overlay_clips?: Record<string, unknown>[] }
+  | { type: 'pipeline_complete'; phase: Phase; render_path?: string; timeline_path?: string; music_path?: string; overlay_clips?: Record<string, unknown>[]; log_dir?: string }
+  | { type: 'pipeline_stopped'; log_dir?: string }
   | { type: 'caption_style_options'; styles: CaptionStylePreset[] }
   | { type: 'pong' };
 

@@ -1,4 +1,11 @@
-import ky from "ky";
+export interface EditingOptions {
+  editing_mode: "narration" | "highlights";
+  audio_provider: "elevenlabs" | "soundstripe" | "none";
+  sound_effects_enabled: boolean;
+  caption_style_id: string;
+}
+
+import ky, { HTTPError } from "ky";
 import { getBackendUrlSync } from "./backend";
 import {
   AssetsResponse,
@@ -16,6 +23,7 @@ import {
   RenderRequest,
   RenderResponse,
   ColorGrade,
+  PipelineError,
 } from "@/types/kinetograph";
 
 function createApi() {
@@ -31,6 +39,40 @@ let _api: ReturnType<typeof ky.create> | null = null;
 function api() {
   if (!_api) _api = createApi();
   return _api;
+}
+
+/** Best human-readable message for a failed request — prefers FastAPI's `detail`. */
+export async function apiErrorMessage(err: unknown, fallback: string): Promise<string> {
+  if (err instanceof HTTPError) {
+    try {
+      const body = (await err.response.clone().json()) as { detail?: unknown };
+      if (typeof body.detail === "string") return body.detail;
+    } catch {
+      // not JSON — fall through
+    }
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
+export interface RunNode {
+  node: string;
+  phase: string;
+  duration_s: number;
+  finished_at: string;
+}
+
+export interface RunSummary {
+  run_id: string;
+  status: "running" | "awaiting_approval" | "complete" | "error" | "cancelled" | string;
+  started_at?: string;
+  ended_at?: string;
+  duration_s?: number;
+  prompt?: string;
+  nodes: RunNode[];
+  errors: PipelineError[];
+  error?: string;
+  api_keys?: Record<string, boolean>;
+  log_dir: string;
 }
 
 /** Call this after backend URL is resolved to reinitialize the API client */
@@ -99,6 +141,14 @@ export const KinetographAPI = {
   approvePipeline: (request: ApprovalRequest) =>
     api().post("pipeline/approve", { json: request }).json<RunResponse>(),
 
+  stopPipeline: () =>
+    api()
+      .post("pipeline/stop", { timeout: 30_000 })
+      .json<{ status: "stopped" | "stopping" | "not_running" }>(),
+
+  getRuns: (limit = 50) =>
+    api().get(`runs?limit=${limit}`).json<{ runs: RunSummary[] }>(),
+
   // NOTE: getPaperEdit and savePaperEdit removed — paper edit is now synced
   // in real-time via Yjs CRDT over /ws/crdt WebSocket connection.
 
@@ -109,12 +159,16 @@ export const KinetographAPI = {
   editPipeline: (request: EditRequest) =>
     api().post("pipeline/edit", { json: request }).json<EditResponse>(),
 
-  getCaptionStyles: () =>
-    api().get("pipeline/caption-styles").json<{ styles: CaptionStylePreset[] }>(),
+  getEditingOptions: () => api().get("project/editing-options").json<EditingOptions>(),
+  saveEditingOptions: (options: EditingOptions) =>
+    api().put("project/editing-options", { json: options }).json<EditingOptions>(),
 
-  selectCaptionStyle: (styleId: string) =>
+  getCaptionStyles: () =>
+    api().get("pipeline/caption-styles").json<{ styles: CaptionStylePreset[]; selected_style_id: string }>(),
+
+  selectCaptionStyle: (styleId: string, apply = false) =>
     api()
-      .post("pipeline/caption-style", { json: { style_id: styleId } })
+      .post("pipeline/caption-style", { json: { style_id: styleId, apply } })
       .json<{ status: string; style_id: string; style_name: string }>(),
 
 

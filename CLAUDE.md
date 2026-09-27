@@ -29,6 +29,7 @@ Backend alone (from repo root, venv active):
 ```bash
 uvicorn kinetograph.server:app --host 127.0.0.1 --port 8080 --reload --reload-dir backend/src
 kinetograph run "<prompt>" --project <name>   # headless pipeline via CLI (python -m kinetograph)
+kinetograph runs [<run_id>] --project <dir>    # list / inspect logged pipeline runs
 ```
 
 Tests / lint / typecheck:
@@ -39,24 +40,32 @@ cd backend && ruff check src/                 # line-length 100, rules E/F/I/W
 cd desktop && npm run typecheck               # tsc --noEmit
 ```
 
-Distribution builds: `cd desktop && npm run build` (add `-- --win` / `-- --linux`); output in `desktop/release/`. Production bundles the backend via PyInstaller — see `desktop/package.json` → `build.extraResources`.
+Distribution builds: `cd desktop && npm run build` (add `-- --win` / `-- --linux`); output in `desktop/release/`. `build` first runs `build:sidecar` (`backend/scripts/build_sidecar.py`), which PyInstaller-bundles `kinetograph/sidecar.py` as the backend binary — see `desktop/package.json` → `build.extraResources`.
 
 ## Backend architecture
 
-The pipeline is a **deterministic sequential LangGraph StateGraph** (`orchestrator.py`), not LLM-routed. Fixed order:
+The pipeline is a **deterministic LangGraph StateGraph** (`orchestrator.py`, `build_graph()`), not LLM-routed. Routing is by rule-based conditional edges:
 
 ```
-archivist → scripter → human_review → [synthesizer?] → director → captioner → sound_engineer → export → END
+archivist → scripter ⇄ critic → human_review → [synthesizer?] → director → captioner → sound_engineer → export → END
+                                     ↑ reject → scripter
+any node with phase == "error" → error_handler → END
 ```
 
+- `critic` (`agents/critic.py`) is a Gemini editorial-QA pass on every fresh/revised edit. It sends the edit back to `scripter` only when feedback `needs_revision()` and `critic_iteration < CRITIC_MAX_ITERATIONS` (2) — a bounded loop; otherwise (or on critic error) it proceeds to `human_review`.
+- Post-approval agents **swallow exceptions** and return `{"phase": Phase.ERROR}` instead of raising; `_route_on_error` guards each edge so a failed render doesn't reach `export` and report COMPLETE. Preserve this pattern when adding nodes.
+- `schema.py` — Pydantic v2 Editorial Decision List (EDL) models (`EditorialDecisionList`, `CriticFeedback`, …). Agents still write plain dicts into `GraphState` but validate at boundaries via `model_validate` / `model_dump`.
+- `observability.py` — OpenTelemetry traces + metrics to SigNoz over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`, default `http://localhost:4318`). The orchestrator's `_make_node` wrapper instruments every agent; `init_telemetry()` is called by the server and CLI. Without it (e.g. tests) all helpers are no-ops, and a down collector never fails the pipeline. Dashboard/alert defs live in `backend/observability/`.
+- `runlog.py` — every `_stream_pipeline` call writes `<project>/logs/runs/<ts>_<run_id>/` (`run.json` summary with per-node timings + errors + key presence, `events.jsonl`, `backend.log` with secrets redacted). Exposed via `GET /api/runs[/{run_id}]` and `kinetograph runs`. `POST /api/pipeline/stop` cancels the running task; `_stream_pipeline` swallows `CancelledError` and broadcasts `pipeline_stopped`, and `compositor.py` kills FFmpeg on cancel (work inside `asyncio.to_thread` can't be interrupted).
+- API keys: the packaged app reads `KINETOGRAPH_ENV_FILE` (`<userData>/.env`, written by the Settings page), **not** the repo `.env`. `settings.reload_secrets()` re-reads keys at each run start so Settings → Save applies without restarting; `/api/pipeline/run` returns 412 when the Gemini key is missing.
 - `state.py` — `GraphState` is a `TypedDict` (LangGraph requires TypedDict, not a Pydantic model). List fields use `operator.add` reducers → append semantics. `Phase` is a str-enum; `_normalize_phase` in the orchestrator converts enums to plain strings before checkpoint serialization to avoid LangGraph deserialization warnings.
-- `human_review` uses LangGraph `interrupt()` — the user **must** approve the paper edit before rendering. Approval resumes via `/api/pipeline/approve`.
+- `human_review` uses LangGraph `interrupt()` — the user **must** approve the paper edit before rendering. Approval resumes via `/api/pipeline/approve`. A rejection loops back to `scripter`. REST endpoints are documented in `docs/API.md`.
 - Synthesizer runs only if the approved edit contains clips with `clip_type == "synth"` (Pexels stock B-roll).
 - **Edits** (post-pipeline tweaks) don't re-run the whole graph. `/api/pipeline/edit` calls `_classify_edit()` in `server.py`, a keyword rule-based classifier that picks a `start_from` node: music/audio → `sound_engineer`, captions/text → `captioner`, render/color/quality → `director`, else (content change) → `scripter` (which goes through approval again). The graph is recompiled with that entry point.
 - `agents/` — one module per pipeline node. Note `producer.py` only contains `human_review_node`; the "Producer as LLM orchestrator" description in `README.md` is outdated — there is no LLM routing.
 - `core/` — shared rendering: `compositor.py`'s `FilterGraphBuilder` compiles the whole timeline (trim/concat/xfade/PiP/caption burn-in) into a single `ffmpeg -filter_complex` command; `hwaccel.py` smoke-tests encoders at startup (videotoolbox → nvenc → qsv → vaapi → libx264); `media.py` does ffprobe + processing (all FFmpeg calls are `asyncio.create_subprocess_exec` so the event loop never blocks).
 - `config.py` — `Settings` (pydantic-settings) loads `.env` from repo root; `settings` is an importable singleton. All project paths derive from `_project_root`, which is `KINETOGRAPH_PROJECT_DIR` when set, else repo root.
-- `server.py` (~2100 lines) is the single FastAPI app: pipeline control, asset management (import-by-reference, thumbnails, waveforms, cached ffprobe), and WebSockets. Routes are tagged `System` / `Pipeline` / `Assets`.
+- `server.py` (~2400 lines) is the single FastAPI app: pipeline control, asset management (import-by-reference, thumbnails, waveforms, cached ffprobe), and WebSockets. Routes are tagged `System` / `Pipeline` / `Assets`.
 
 ## Frontend ↔ backend contract
 

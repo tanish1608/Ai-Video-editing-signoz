@@ -232,6 +232,11 @@ class FilterGraphBuilder:
 
     def xfade(self, a: str, b: str, duration: float, offset: float) -> str:
         """Video crossfade (``xfade``) between two pads."""
+        # concat emits AVTB while trimmed inputs use 1/fps; xfade requires equal bases.
+        left, right = self._label("tb"), self._label("tb")
+        self._filters.append(f"[{a}]fps={self._fps},settb=AVTB,setpts=PTS-STARTPTS[{left}]")
+        self._filters.append(f"[{b}]fps={self._fps},settb=AVTB,setpts=PTS-STARTPTS[{right}]")
+        a, b = left, right
         out = self._label("xf")
         self._filters.append(
             f"[{a}][{b}]xfade=transition=fade:duration={duration:.6f}:offset={offset:.6f}[{out}]"
@@ -563,6 +568,7 @@ class FilterGraphBuilder:
         segments: list[SegmentResult],
         crossfade_dur: float = 0.2,
         bookend_fade: float = 0.3,
+        transitions: list[float] | None = None,
     ) -> tuple[str, str | None, float]:
         """
         Chain multiple segments with video crossfade transitions.
@@ -583,49 +589,23 @@ class FilterGraphBuilder:
                 a = self.fade_audio(a, s.duration, bookend_fade, bookend_fade)
             return v, a, s.duration
 
-        # ── Video: iterative xfade chain ─────────────────────────────────
-        xf = min(crossfade_dur, 0.5)
+        overlaps = segment_overlaps(segments, crossfade_dur, transitions)
         current_v = segments[0].video_label
+        current_a = segments[0].audio_label or self.null_audio(segments[0].duration)
         cumulative_dur = segments[0].duration
-
-        for seg in segments[1:]:
-            offset = cumulative_dur - xf
-            if offset < 0.01:
-                # Segment too short for crossfade → just concat
+        for seg, overlap in zip(segments[1:], overlaps):
+            audio = seg.audio_label or self.null_audio(seg.duration)
+            if overlap:
+                current_v = self.xfade(
+                    current_v, seg.video_label, overlap, cumulative_dur - overlap
+                )
+                current_a = self.acrossfade(current_a, audio, overlap)
+            else:
                 current_v = self.concat_video([current_v, seg.video_label])
-                cumulative_dur += seg.duration
-            else:
-                current_v = self.xfade(current_v, seg.video_label, xf, offset)
-                cumulative_dur = cumulative_dur + seg.duration - xf
-
-        # Bookend fades
+                current_a = self.concat_audio([current_a, audio])
+            cumulative_dur += seg.duration - overlap
         current_v = self.fade_video(current_v, cumulative_dur, bookend_fade, bookend_fade)
-
-        # ── Audio: crossfade chain matching video overlap ────────────────
-        # Each video xfade overlaps by `xf` seconds, so audio must also
-        # overlap by the same amount to stay aligned with the video.
-        audio_labels = [s.audio_label for s in segments if s.audio_label]
-        current_a: str | None = None
-        if audio_labels:
-            if len(audio_labels) == 1:
-                current_a = audio_labels[0]
-            else:
-                current_a = audio_labels[0]
-                a_dur = segments[0].duration
-                for i, seg in enumerate(segments[1:], start=1):
-                    if seg.audio_label is None:
-                        continue
-                    # Crossfade audio with the same overlap as video
-                    if a_dur - xf >= 0.01 and seg.duration >= xf:
-                        current_a = self.acrossfade(current_a, seg.audio_label, xf)
-                        a_dur = a_dur + seg.duration - xf
-                    else:
-                        current_a = self.concat_audio([current_a, seg.audio_label])
-                        a_dur += seg.duration
-                # Safety trim if rounding leaves audio slightly long
-                if a_dur > cumulative_dur + 0.01:
-                    current_a = self.atrim_to_duration(current_a, cumulative_dur)
-            current_a = self.fade_audio(current_a, cumulative_dur, bookend_fade, bookend_fade)
+        current_a = self.fade_audio(current_a, cumulative_dur, bookend_fade, bookend_fade)
 
         return current_v, current_a, cumulative_dur
 
@@ -846,7 +826,8 @@ async def render(
             proc.communicate(),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        # Timeout, or the pipeline was stopped — don't leave FFmpeg rendering.
         proc.kill()
         # Reap the killed process so it doesn't linger as a zombie with
         # undrained pipes ("Exception ignored" transport warnings).
@@ -854,6 +835,8 @@ async def render(
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             pass
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise RuntimeError(f"FFmpeg render timed out after {timeout}s")
 
     if proc.returncode != 0:
@@ -894,12 +877,14 @@ async def run_ffmpeg_async(
                 proc.communicate(),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             proc.kill()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(f"{description} timed out after {timeout}s")
 
         if proc.returncode != 0:
@@ -907,3 +892,18 @@ async def run_ffmpeg_async(
             raise RuntimeError(f"{description} failed (rc={proc.returncode}): {err_text[-500:]}")
 
         return stdout, stderr
+
+
+def segment_overlaps(
+    segments: list[SegmentResult],
+    default: float = 0.2,
+    transitions: list[float] | None = None,
+) -> list[float]:
+    """One overlap per boundary, shared by rendering and source-time mapping."""
+    requested = transitions if transitions is not None else [default] * (len(segments) - 1)
+    if len(requested) != max(0, len(segments) - 1):
+        raise ValueError("Expected one transition per segment boundary")
+    return [
+        max(0.0, min(value, 0.5, left.duration / 2, right.duration / 2))
+        for left, right, value in zip(segments, segments[1:], requested)
+    ]

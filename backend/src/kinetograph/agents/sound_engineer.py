@@ -1,20 +1,6 @@
-"""
-Agent 7: The Sound Engineer
-────────────────────────────
-Full audio mastering pipeline on the rendered video:
+"""Normalize original audio, generate a score/effects, and retain a caption-free master.
 
-  1. **Single-pass noise removal + LUFS normalization** — FFmpeg afftdn
-     adaptive filter chain → loudnorm in one command.
-  2. **Background music** — Fetches vibe-matched music from Soundstripe via
-     Gemini LLM analysis, downloads the track.
-  3. **Music mixing with ducking** — Mixes background music at low volume
-     (~0.35) with automatic ducking during speech segments (drops to ~0.15)
-     so dialogue always cuts through cleanly.
-  4. **Final master** — Outputs the polished video ready for export.
-
-All FFmpeg commands run via ``asyncio.create_subprocess_exec`` so the
-FastAPI event loop is never blocked (unlike the old ``subprocess.run``
-calls which froze the entire server during mastering).
+All FFmpeg operations run asynchronously. Caption edits skip this stage entirely.
 """
 
 from __future__ import annotations
@@ -47,40 +33,12 @@ async def _denoise_and_normalize(
     output_path: str,
     target_lufs: float = -14.0,
 ) -> Path:
-    """
-    Remove background noise AND normalize loudness in a **single FFmpeg pass**.
-
-    Old pipeline ran 3 passes: denoise → LUFS measure → LUFS apply.
-    This consolidates into 1 pass (single-pass loudnorm is ~95% as accurate
-    as two-pass and eliminates an entire re-encode).
-
-    Filter chain:
-      highpass → afftdn → EQ → anlmdn → gate → speechnorm → compressor → loudnorm
-    """
+    """Normalize loudness without destructive gates, fixed EQ or stacked denoisers."""
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    audio_filter = ",".join(
-        [
-            # 1. Bandpass — kill sub-bass rumble and high-freq hiss
-            "highpass=f=120:poles=2",
-            "lowpass=f=9500",
-            # 2. Adaptive FFT denoiser — removes steady-state hiss / hum
-            "afftdn=nf=-20:tn=1:om=o",
-            # 3. EQ cut at room-resonance frequencies (200–600 Hz)
-            "equalizer=f=350:t=q:w=1.2:g=-4",
-            # 4. Non-local-means denoiser — cleans residual echo smear
-            "anlmdn=s=10:p=0.002:r=0.002:m=20",
-            # 5. Noise gate — silence reverb tails between phrases
-            "agate=threshold=0.03:ratio=4:attack=0.3:release=60:range=0.02",
-            # 6. Speech normalizer — evens out sentence-level loudness
-            "speechnorm=e=6:c=6:t=0.03:r=0.002:f=0.002",
-            # 7. Compressor — tame remaining peaks
-            "acompressor=threshold=0.089:ratio=4:attack=5:release=100:makeup=1",
-            # 8. LUFS normalization (single-pass — avoids a second encode)
-            f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-        ]
-    )
+    # Preserve the source timbre; aggressive gates/EQ damaged quiet speech and ambience.
+    audio_filter = f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11"
 
     cmd = [
         "ffmpeg",
@@ -104,10 +62,7 @@ async def _denoise_and_normalize(
         str(out),
     ]
 
-    logger.info(
-        "🔊 Sound Engineer: Single-pass denoise + LUFS "
-        "(highpass → afftdn → EQ → anlmdn → gate → speechnorm → compressor → loudnorm)..."
-    )
+    logger.info("Sound Engineer: Normalize source audio while preserving timbre")
     await run_ffmpeg_async(cmd, timeout=600, description="Denoise+LUFS")
     return out
 
@@ -184,7 +139,11 @@ def _build_ducking_volume_expr(
     for start_s, end_s in speech_windows:
         duck_start = max(0, start_s - fade_sec)
         duck_end = end_s + fade_sec
-        parts.append(f"between(t,{duck_start:.3f},{duck_end:.3f})")
+        ramp = max(fade_sec, 0.01)
+        parts.append(
+            f"min(clip((t-{duck_start:.3f})/{ramp:.3f},0,1),"
+            f"clip(({duck_end:.3f}-t)/{ramp:.3f},0,1))"
+        )
 
     speech_expr = "+".join(parts)
 
@@ -232,15 +191,17 @@ async def _mix_music(
         # (0.5 here), halving the dialogue on top of the music ducking. With it,
         # dialogue [0:a] stays at unity and music sits at the ducking_expr level.
         filter_complex = (
-            f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={video_duration_s:.3f},"
-            f"asetpts=N/SR/TB,{ducking_expr}[music];"
-            f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[out]"
+            f"[1:a]atrim=duration={video_duration_s:.3f},"
+            f"asetpts=N/SR/TB,loudnorm=I=-18:TP=-2:LRA=11,{ducking_expr},"
+            f"afade=t=in:d=0.25,afade=t=out:st={max(0, video_duration_s - 1):.3f}:d=1[music];"
+            f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=3:normalize=0,alimiter=limit=0.891:level=false:latency=true[out]"
         )
     else:
         logger.info("🔊 Sound Engineer: Video has no audio — using music only")
         filter_complex = (
-            f"[1:a]aloop=loop=-1:size=2e+09,atrim=duration={video_duration_s:.3f},"
-            f"asetpts=N/SR/TB,{ducking_expr}[out]"
+            f"[1:a]atrim=duration={video_duration_s:.3f},"
+            f"asetpts=N/SR/TB,loudnorm=I=-18:TP=-2:LRA=11,{ducking_expr},"
+            f"afade=t=in:d=0.25,afade=t=out:st={max(0, video_duration_s - 1):.3f}:d=1[out]"
         )
 
     cmd = [
@@ -248,6 +209,8 @@ async def _mix_music(
         "-y",
         "-i",
         video_path,
+        "-stream_loop",
+        "-1",
         "-i",
         music_path,
         "-filter_complex",
@@ -321,12 +284,14 @@ async def sound_engineer_node(state: GraphState) -> dict:
     """
     logger.info("🔊 Sound Engineer: Starting audio mastering pipeline...")
 
-    render_path = state.get("render_path")
+    render_path = state.get("picture_path")
     master_index = state.get("master_index", [])
     approved_edit = state.get("approved_edit")
     edit_instruction = state.get("edit_instruction")
     state_music_prompt = state.get("music_prompt")
     existing_music = state.get("music_path")
+    provider = state.get("audio_provider", "elevenlabs")
+    warnings = []
 
     if not render_path or not Path(render_path).exists():
         return {
@@ -345,7 +310,7 @@ async def sound_engineer_node(state: GraphState) -> dict:
         render_p = Path(render_path)
         # Sanitize stem: colons are interpreted as protocol separators by FFmpeg
         safe_stem = re.sub(r"[^\w\s\-.]", "_", render_p.stem)
-        work_dir = settings.state_dir / "sound_engineer"
+        work_dir = settings.state_dir / "sound_engineer" / state.get("run_id", "audio")
         work_dir.mkdir(parents=True, exist_ok=True)
 
         current_path = render_path
@@ -354,7 +319,7 @@ async def sound_engineer_node(state: GraphState) -> dict:
         render_meta = await probe_media_async(current_path)
         has_audio = render_meta.get("has_audio", False)
 
-        # ── Step 1: Single-pass Denoise + LUFS ────────────────
+        # ── Step 1: Source loudness normalization ────────────────
         if has_audio:
             denoised_path = str(work_dir / f"{safe_stem}_denoised.mp4")
             try:
@@ -373,12 +338,30 @@ async def sound_engineer_node(state: GraphState) -> dict:
         music_path: str | None = None
 
         # Re-use existing music file if available (not cleared by edit agent)
-        if existing_music and Path(existing_music).exists():
+        if provider != "none" and existing_music and Path(existing_music).exists():
             music_path = existing_music
             logger.info(
                 f"🔊 Sound Engineer: ♻️ Re-using existing music → {Path(existing_music).name}"
             )
-        elif soundstripe_configured():
+        elif provider == "elevenlabs":
+            from kinetograph.core.generated_audio import generate_audio
+
+            prompt = state_music_prompt or "Subtle instrumental cinematic background score"
+            if edit_instruction:
+                prompt += f". Requested direction: {edit_instruction}"
+            try:
+                music_path = str(await generate_audio(prompt, render_meta["duration_ms"]))
+            except Exception as exc:
+                logger.warning("ElevenLabs music generation failed: %s", exc)
+                warnings.append(
+                    {
+                        "agent": "sound_engineer",
+                        "recoverable": True,
+                        "message": "ElevenLabs music generation failed. Check your key, "
+                        "plan and connection, then retry the audio edit.",
+                    }
+                )
+        elif provider == "soundstripe" and soundstripe_configured():
             try:
                 video_desc = build_video_description(approved_edit, master_index)
                 # Append state-level music_prompt and edit_instruction for richer context
@@ -420,22 +403,60 @@ async def sound_engineer_node(state: GraphState) -> dict:
                     music_path=music_path,
                     output_path=mixed_path,
                     speech_windows=speech_windows,
-                    music_volume=0.35,  # 35% volume normally
-                    music_ducked_volume=0.15,  # 15% during speech
+                    music_volume=0.55 if state.get("editing_mode") == "highlights" else 0.28,
+                    music_ducked_volume=0.10,
                 )
                 current_path = mixed_path
                 logger.info("🔊 Sound Engineer: ✓ Music mixed with speech ducking")
             except Exception as exc:
-                logger.warning(
-                    f"🔊 Sound Engineer: Music mixing failed ({exc}), continuing without music..."
+                logger.warning("Music mixing failed: %s", exc)
+                warnings.append(
+                    {
+                        "agent": "sound_engineer",
+                        "recoverable": True,
+                        "message": "Music could not be mixed into this render.",
+                    }
                 )
+
+        # Optional sparse effects are anchored to rendered clip starts, not guessed timestamps.
+        if provider == "elevenlabs" and state.get("sound_effects_enabled", True):
+            from kinetograph.core.generated_audio import generate_audio
+
+            cues = (approved_edit or {}).get("sound_effects", [])[:3]
+            mapping = (approved_edit or {}).get("render_map", [])
+            for i, cue in enumerate(cues):
+                regions = [r for r in mapping if r["clip_id"] == cue.get("clip_id")]
+                if not regions or not cue.get("prompt"):
+                    continue
+                start_ms = min(r["timeline_start_ms"] for r in regions) + max(
+                    0, min(3000, int(cue.get("offset_ms", 0)))
+                )
+                duration = min(3000, max(500, int(cue.get("duration_ms", 1000))))
+                if start_ms + duration > render_meta["duration_ms"]:
+                    continue
+                try:
+                    effect = await generate_audio(cue["prompt"], duration, kind="effect")
+                    output = str(work_dir / f"effect-{i}.mp4")
+                    await _mix_effect(current_path, str(effect), output, start_ms, duration)
+                    current_path = output
+                except Exception as exc:
+                    logger.warning("Sound effect generation/mix failed: %s", exc)
+                    warnings.append(
+                        {
+                            "agent": "sound_engineer",
+                            "recoverable": True,
+                            "message": "A requested sound effect could not be generated.",
+                        }
+                    )
 
         # ── Step 5: Final Master ───────────────────────────────
         # Strip existing _mastered suffix to prevent _mastered_mastered
         stem = safe_stem
         if stem.endswith("_mastered"):
             stem = stem[: -len("_mastered")]
-        mastered_path = render_p.parent / f"{stem}_mastered{render_p.suffix}"
+        output_dir = settings.output_dir / "runs" / state.get("run_id", "audio")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        mastered_path = output_dir / f"{stem}_mastered{render_p.suffix}"
 
         if current_path != str(mastered_path):
             # Copy/remux to final output location (async)
@@ -482,6 +503,10 @@ async def sound_engineer_node(state: GraphState) -> dict:
         return_state: dict = {
             "phase": Phase.MASTERED,
             "render_path": str(mastered_path),
+            "caption_source_path": str(mastered_path),
+            "caption_path": None,
+            "music_path": music_path,
+            "errors": warnings,
             "render_history": [str(mastered_path)],
         }
         if music_path:
@@ -502,3 +527,46 @@ async def sound_engineer_node(state: GraphState) -> dict:
                 }
             ],
         }
+
+
+async def _mix_effect(video: str, effect: str, output: str, start_ms: int, duration_ms: int):
+    """A restrained effect over the master, limited and trimmed to picture length."""
+    meta = await probe_media_async(video)
+    duration = meta["duration_ms"] / 1000
+    base = "[0:a]" if meta.get("has_audio") else "[silence]"
+    silence = (
+        ""
+        if meta.get("has_audio")
+        else (f"anullsrc=r=48000:cl=stereo,atrim=duration={duration}[silence];")
+    )
+    filters = (
+        silence + f"[1:a]atrim=duration={duration_ms / 1000},asetpts=PTS-STARTPTS,"
+        f"loudnorm=I=-24:TP=-6:LRA=7,volume=0.3,adelay={start_ms}:all=1[fx];"
+        f"{base}[fx]amix=inputs=2:duration=first:normalize=0,"
+        "alimiter=limit=0.891:level=false:latency=true[out]"
+    )
+    await run_ffmpeg_async(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video,
+            "-i",
+            effect,
+            "-filter_complex",
+            filters,
+            "-map",
+            "0:v",
+            "-map",
+            "[out]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-t",
+            str(duration),
+            output,
+        ],
+        timeout=600,
+        description="Mix sound effect",
+    )

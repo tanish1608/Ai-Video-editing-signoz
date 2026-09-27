@@ -1,3 +1,4 @@
+import { currentRenderPath } from "@/lib/render-output";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useKinetographStore } from "@/store/use-kinetograph-store";
 import { useChatStore } from "@/store/use-chat-store";
@@ -74,14 +75,10 @@ export function useKinetographWS() {
 						const backendUrl = getBackendUrlSync();
 						KinetographAPI.getOutputs()
 							.then((out) => {
-								const mp4s = out.files.filter((f) => f.type === "mp4");
-								const bestMp4 =
-									mp4s.find((f) => f.file_name.includes("_mastered")) ||
-									mp4s.find((f) => f.file_name.includes("_captioned")) ||
-									mp4s[mp4s.length - 1];
-								if (bestMp4) {
+								const renderPath = currentRenderPath(out.files, data.render_path);
+								if (renderPath) {
 									store.setRenderUrl(
-										`${backendUrl}/api/assets/stream?path=${encodeURIComponent(bestMp4.file_path)}`,
+										`${backendUrl}/api/assets/stream?path=${encodeURIComponent(renderPath)}`,
 									);
 								}
 							})
@@ -190,7 +187,8 @@ export function useKinetographWS() {
 					if (completedPhase === Phase.ERROR) {
 						chat.addPipelineError(
 							[],
-							"❌ Pipeline encountered an error and could not complete. Check the logs or try again.",
+							"❌ Pipeline encountered an error and could not complete. Open the run log for details, or try again.",
+							data.log_dir,
 						);
 						break;
 					}
@@ -208,22 +206,18 @@ export function useKinetographWS() {
 					const backendUrl = getBackendUrlSync();
 					KinetographAPI.getOutputs()
 						.then((out) => {
-							const mp4s = out.files.filter((f) => f.type === "mp4");
-							const bestMp4 =
-								mp4s.find((f) => f.file_name.includes("_mastered")) ||
-								mp4s.find((f) => f.file_name.includes("_captioned")) ||
-								mp4s[mp4s.length - 1];
+							const renderPath = currentRenderPath(out.files, data.render_path);
 							const timeline = out.files.find((f) => f.type === "otio");
 
-							if (bestMp4) {
+							if (renderPath) {
 								// Cache-bust so the <video> element reloads even if the filename is the same
 								store.setRenderUrl(
-									`${backendUrl}/api/assets/stream?path=${encodeURIComponent(bestMp4.file_path)}&t=${Date.now()}`,
+									`${backendUrl}/api/assets/stream?path=${encodeURIComponent(renderPath)}&t=${Date.now()}`,
 								);
 							}
 
 							chat.addPipelineComplete(
-								bestMp4?.file_path || data.render_path,
+								renderPath || data.render_path,
 								timeline?.file_path || data.timeline_path,
 							);
 						})
@@ -232,6 +226,20 @@ export function useKinetographWS() {
 						});
 					break;
 				}
+
+				case "pipeline_stopped":
+					store.setPhase(Phase.IDLE);
+					chat.setProcessing(false);
+					chat.setPipelineActive(false);
+					chat.setAgentActivity(null);
+					chat.removeLoadingMessages();
+					chat.addMessage({
+						role: "assistant",
+						type: "text",
+						content: "⏹️ Pipeline stopped. You can send a new prompt or edit when ready.",
+						logDir: data.log_dir,
+					});
+					break;
 
 				case "pong":
 					break;

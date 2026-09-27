@@ -1,3 +1,4 @@
+import { EditingOptionsPanel } from "./editing-options";
 import {
 	useEffect,
 	useRef,
@@ -9,7 +10,7 @@ import {
 } from "react";
 import { useChatStore } from "@/store/use-chat-store";
 import { useKinetographStore } from "@/store/use-kinetograph-store";
-import { KinetographAPI } from "@/lib/api";
+import { KinetographAPI, apiErrorMessage } from "@/lib/api";
 import { getBackendUrlSync } from "@/lib/backend";
 import { cn } from "@/lib/utils";
 import {
@@ -28,6 +29,8 @@ import {
 	Minus,
 	Plus,
 	Type,
+	Square,
+	FileText,
 
 } from "lucide-react";
 import type { ChatMessage } from "@/types/chat";
@@ -98,8 +101,7 @@ export function ChatPanel({ onClose }: ChatPanelProps) {
 			}
 			// The WebSocket hook will handle pushing agent updates as messages
 		} catch (err: unknown) {
-			const msg =
-				err instanceof Error ? err.message : "Pipeline failed to start.";
+			const msg = await apiErrorMessage(err, "Pipeline failed to start.");
 			addSystemMessage(`❌ ${msg}`, "pipeline-error");
 			setProcessing(false);
 			setPipelineActive(false);
@@ -142,7 +144,7 @@ const handleSend = useCallback(async () => {
 					addSystemMessage("🔄 No active session — starting a fresh pipeline run...");
 					await _startFreshRun(text);
 				} else {
-					const msg = err instanceof Error ? err.message : "Edit request failed.";
+					const msg = await apiErrorMessage(err, "Edit request failed.");
 					addSystemMessage(`❌ ${msg}`, "pipeline-error");
 					setProcessing(false);
 					setPipelineActive(false);
@@ -154,6 +156,31 @@ const handleSend = useCallback(async () => {
 		// Otherwise, start a new pipeline run
 		await _startFreshRun(text);
 	}, [input, isProcessing, phase, paperEdit, pipelineActive, addUserMessage, addSystemMessage, setProcessing, setPipelineActive, _startFreshRun]);
+
+	// ─── Stop handler ─────────────────────────────────────────────────
+	const [isStopping, setIsStopping] = useState(false);
+	const canStop = isProcessing && phase !== "awaiting_approval";
+
+	const handleStop = useCallback(async () => {
+		setIsStopping(true);
+		try {
+			const res = await KinetographAPI.stopPipeline();
+			if (res.status === "not_running") {
+				// Nothing running server-side — just clear a stuck spinner.
+				setProcessing(false);
+				setPipelineActive(false);
+				useChatStore.getState().setAgentActivity(null);
+			} else if (res.status === "stopping") {
+				addSystemMessage("⏳ Stopping — waiting for the current step to wind down...");
+			}
+			// "stopped": the pipeline_stopped WebSocket event updates the UI.
+		} catch (err: unknown) {
+			const msg = await apiErrorMessage(err, "Could not stop the pipeline.");
+			addSystemMessage(`❌ ${msg}`, "pipeline-error");
+		} finally {
+			setIsStopping(false);
+		}
+	}, [addSystemMessage, setProcessing, setPipelineActive]);
 
 	const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
 		if (e.key === "Enter" && !e.shiftKey) {
@@ -178,12 +205,15 @@ const handleSend = useCallback(async () => {
 						</span>
 					)}
 				</div>
-				<button
-					onClick={onClose}
-					className="p-1 hover:bg-zinc-800 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
-				>
-					<X className="h-3.5 w-3.5" />
-				</button>
+				<div className="flex items-center gap-0.5">
+					<LatestRunLogButton />
+					<button
+						onClick={onClose}
+						className="p-1 hover:bg-zinc-800 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
+					>
+						<X className="h-3.5 w-3.5" />
+					</button>
+				</div>
 			</div>
 
 			{/* Agent Activity Bar */}
@@ -208,6 +238,7 @@ const handleSend = useCallback(async () => {
 			</div>
 
 			{/* Input */}
+            <div className="px-3"><EditingOptionsPanel /></div>
 			<div className="border-t border-zinc-800 p-2 shrink-0">
 				<div className="relative flex items-end gap-1.5 bg-zinc-900/80 border border-zinc-700/50 rounded-lg px-3 py-2 focus-within:border-purple-500/50 transition-colors">
 					<textarea
@@ -234,18 +265,33 @@ const handleSend = useCallback(async () => {
 							target.style.height = Math.min(target.scrollHeight, 96) + "px";
 						}}
 					/>
-					<button
-						onClick={handleSend}
-						disabled={!input.trim() || isProcessing}
-						className={cn(
-							"p-1 rounded transition-colors shrink-0",
-							input.trim() && !isProcessing
-								? "text-purple-400 hover:bg-purple-500/20 hover:text-purple-300"
-								: "text-zinc-700 cursor-not-allowed",
-						)}
-					>
-						<Send className="h-3.5 w-3.5" />
-					</button>
+					{canStop ? (
+						<button
+							onClick={handleStop}
+							disabled={isStopping}
+							title="Stop the pipeline"
+							className="p-1 rounded transition-colors shrink-0 text-red-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
+						>
+							{isStopping ? (
+								<Loader2 className="h-3.5 w-3.5 animate-spin" />
+							) : (
+								<Square className="h-3.5 w-3.5 fill-current" />
+							)}
+						</button>
+					) : (
+						<button
+							onClick={handleSend}
+							disabled={!input.trim() || isProcessing}
+							className={cn(
+								"p-1 rounded transition-colors shrink-0",
+								input.trim() && !isProcessing
+									? "text-purple-400 hover:bg-purple-500/20 hover:text-purple-300"
+									: "text-zinc-700 cursor-not-allowed",
+							)}
+						>
+							<Send className="h-3.5 w-3.5" />
+						</button>
+					)}
 				</div>
 				<div className="flex items-center justify-between px-1 mt-1">
 					<span className="text-[9px] text-zinc-600">
@@ -321,8 +367,7 @@ function SuggestionButton({ text }: { text: string }) {
 				useChatStore.getState().setThreadId(res.thread_id);
 			}
 		} catch (err: unknown) {
-			const msg =
-				err instanceof Error ? err.message : "Pipeline failed to start.";
+			const msg = await apiErrorMessage(err, "Pipeline failed to start.");
 			addSystemMessage(`❌ ${msg}`, "pipeline-error");
 			setProcessing(false);
 			setPipelineActive(false);
@@ -352,7 +397,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 			return message.role === "user" ? (
 				<UserMessage content={message.content} />
 			) : (
-				<AssistantMessage content={message.content} />
+				<AssistantMessage content={message.content} logDir={message.logDir} />
 			);
 		case "agent-update":
 			return (
@@ -371,7 +416,9 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 		case "pipeline-complete":
 			return <PipelineCompleteMessage message={message} />;
 		case "pipeline-error":
-			return <ErrorMessage content={message.content} errors={message.errors} />;
+			return (
+				<ErrorMessage content={message.content} errors={message.errors} logDir={message.logDir} />
+			);
 		case "edit-request":
 			return <UserMessage content={message.content} />;
 		case "edit-response":
@@ -404,7 +451,7 @@ function UserMessage({ content }: { content: string }) {
 
 // ─── Assistant message ────────────────────────────────────────────────────────
 
-function AssistantMessage({ content }: { content: string }) {
+function AssistantMessage({ content, logDir }: { content: string; logDir?: string }) {
 	return (
 		<div className="flex justify-start">
 			<div className="flex items-start gap-2 max-w-[85%]">
@@ -415,6 +462,7 @@ function AssistantMessage({ content }: { content: string }) {
 					<p className="text-[11px] text-zinc-300 leading-relaxed whitespace-pre-wrap">
 						{content}
 					</p>
+					{logDir && <OpenRunLogButton logDir={logDir} />}
 				</div>
 			</div>
 		</div>
@@ -881,9 +929,11 @@ function PipelineCompleteMessage({ message }: { message: ChatMessage }) {
 function ErrorMessage({
 	content,
 	errors,
+	logDir,
 }: {
 	content: string;
 	errors?: import("@/types/kinetograph").PipelineError[];
+	logDir?: string;
 }) {
 	return (
 		<div className="flex justify-start">
@@ -906,9 +956,58 @@ function ErrorMessage({
 							))}
 						</div>
 					)}
+					{logDir && <OpenRunLogButton logDir={logDir} />}
 				</div>
 			</div>
 		</div>
+	);
+}
+
+// ─── Run logs ─────────────────────────────────────────────────────────────────
+// Each pipeline run writes <project>/logs/runs/<run>/ (run.json, events.jsonl,
+// backend.log). These buttons reveal that folder in Finder / Explorer.
+
+function revealRunLog(logDir: string) {
+	window.electron?.showItemInFolder(`${logDir}/run.json`);
+}
+
+function OpenRunLogButton({ logDir }: { logDir: string }) {
+	return (
+		<button
+			onClick={() => revealRunLog(logDir)}
+			title={logDir}
+			className="mt-1.5 flex items-center gap-1 text-[9px] text-zinc-500 hover:text-zinc-300 transition-colors"
+		>
+			<FileText className="h-2.5 w-2.5" />
+			Open run log
+		</button>
+	);
+}
+
+function LatestRunLogButton() {
+	const addSystemMessage = useChatStore((s) => s.addSystemMessage);
+
+	const handleClick = async () => {
+		try {
+			const { runs } = await KinetographAPI.getRuns(1);
+			if (runs.length === 0) {
+				addSystemMessage("No runs have been logged in this project yet.");
+				return;
+			}
+			revealRunLog(runs[0].log_dir);
+		} catch (err: unknown) {
+			addSystemMessage(`❌ ${await apiErrorMessage(err, "Could not load run logs.")}`, "pipeline-error");
+		}
+	};
+
+	return (
+		<button
+			onClick={handleClick}
+			title="Open the latest run's log folder"
+			className="p-1 hover:bg-zinc-800 rounded text-zinc-500 hover:text-zinc-300 transition-colors"
+		>
+			<FileText className="h-3.5 w-3.5" />
+		</button>
 	);
 }
 

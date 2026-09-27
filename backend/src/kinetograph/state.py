@@ -63,6 +63,11 @@ class GraphState(TypedDict, total=False):
     normalized_clips: dict[str, str]
     render_path: Optional[str]
     render_history: Annotated[list[str], operator.add]  # audit trail of every render_path mutation
+    picture_path: Optional[str]  # original render, before audio mastering or captions
+    caption_source_path: Optional[str]  # mastered video without burned captions
+    editing_mode: str
+    audio_provider: str
+    sound_effects_enabled: bool
     caption_path: Optional[str]
     caption_style: Optional[dict]  # user-chosen caption style (font, color, position, bg)
     music_path: Optional[str]

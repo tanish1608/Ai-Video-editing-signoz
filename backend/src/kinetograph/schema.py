@@ -144,6 +144,13 @@ class MusicSpec(BaseModel):
     prompt: str = ""
 
 
+class SoundEffectCue(BaseModel):
+    clip_id: str
+    offset_ms: int = Field(0, ge=0, le=3000)
+    duration_ms: int = Field(1000, ge=500, le=3000)
+    prompt: str = Field(..., min_length=1, max_length=2000)
+
+
 class EditorialDecisionList(BaseModel):
     """The full paper edit — the intelligence→production contract."""
 
@@ -151,6 +158,7 @@ class EditorialDecisionList(BaseModel):
     total_duration_ms: int = 0
     scratchpad: str = ""  # the narrative plan (now persisted)
     music: Optional[MusicSpec] = None
+    sound_effects: list[SoundEffectCue] = Field(default_factory=list, max_length=3)
     clips: list[EditClip] = Field(default_factory=list)
     overlay_clips: list[EditClip] = Field(default_factory=list)
 

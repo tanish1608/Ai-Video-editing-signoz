@@ -1,3 +1,4 @@
+import { applyCaptionStyle } from "@/lib/caption-actions";
 import { useState, useEffect, useCallback } from "react";
 import { KinetographAPI } from "@/lib/api";
 import { CaptionStylePreset } from "@/types/kinetograph";
@@ -31,39 +32,23 @@ export function CaptionsPanel() {
   const [error, setError] = useState<string | null>(null);
 
   const renderUrl = useKinetographStore((s) => s.renderUrl);
-  const paperEdit = useKinetographStore((s) => s.paperEdit);
+  const pipelineActive = useChatStore((s) => s.pipelineActive);
 
   // Fetch available caption style presets from backend
   useEffect(() => {
     KinetographAPI.getCaptionStyles()
       .then((res) => {
         setStyles(res.styles);
-        if (res.styles.length > 0 && !res.styles.find((s) => s.id === selectedStyleId)) {
-          setSelectedStyleId(res.styles[0].id);
-        }
+        setSelectedStyleId(res.selected_style_id);
       })
-      .catch(() => {
-        // Fallback: show a few hardcoded presets when backend is unreachable
-        setStyles([]);
-      });
+      .catch(() => setError("Could not load caption styles. Reopen this panel to retry."));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleGenerate = useCallback(async () => {
     setGenerating(true);
     setError(null);
     try {
-      // 1. Select the caption style on the backend
-      await KinetographAPI.selectCaptionStyle(selectedStyleId);
-
-      // 2. Trigger the edit pipeline starting from the captioner agent
-      const chat = useChatStore.getState();
-      chat.setPipelineActive(true);
-      chat.setProcessing(true);
-      chat.addUserMessage("Generate captions with style: " + selectedStyleId);
-
-      await KinetographAPI.editPipeline({
-        instruction: `generate captions with style ${selectedStyleId}`,
-      });
+      await applyCaptionStyle(selectedStyleId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Caption generation failed";
       setError(msg);
@@ -72,7 +57,8 @@ export function CaptionsPanel() {
     }
   }, [selectedStyleId]);
 
-  const hasClips = paperEdit && paperEdit.clips.length > 0;
+  const hasClips = Boolean(renderUrl);
+  const busy = generating || pipelineActive;
 
   return (
     <div className="flex flex-col gap-3 h-full overflow-y-auto custom-scrollbar">
@@ -92,6 +78,11 @@ export function CaptionsPanel() {
           Style Presets
         </span>
         <div className="flex flex-col gap-1.5">
+          <button onClick={() => setSelectedStyleId("none")}
+            className={cn("rounded-lg border p-2 text-left text-[10px]",
+              selectedStyleId === "none" ? "border-blue-500 text-blue-400" : "border-zinc-800 text-zinc-400")}>
+            No captions
+          </button>
           {styles.map((style) => {
             const activeTextColor = assColorToCss(style.active_color);
             const inactiveTextColor = assColorToCss(style.inactive_color);
@@ -126,11 +117,11 @@ export function CaptionsPanel() {
                     className="rounded px-2 py-1 text-[10px] font-bold"
                     style={{
                       backgroundColor:
-                        style.border_style === 4
+                        style.border_style === 3
                           ? bgColor + "cc" // semi-opaque
                           : "transparent",
                       border:
-                        style.border_style !== 4
+                        style.border_style !== 3
                           ? `1px solid ${assColorToCss(style.outline_color)}60`
                           : "none",
                     }}
@@ -170,7 +161,7 @@ export function CaptionsPanel() {
             );
           })}
 
-          {styles.length === 0 && (
+          {styles.length === 0 && !error && (
             <div className="flex flex-col items-center justify-center py-6 text-zinc-600">
               <Loader2 className="h-4 w-4 animate-spin mb-2" />
               <span className="text-[9px]">Loading styles...</span>
@@ -189,17 +180,17 @@ export function CaptionsPanel() {
       {/* Generate button */}
       <button
         onClick={handleGenerate}
-        disabled={generating || !hasClips}
+        disabled={busy || !hasClips || styles.length === 0}
         className={cn(
           "flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[11px] font-semibold transition-all mt-auto",
-          generating
+          busy
             ? "bg-blue-600/20 text-blue-400 border border-blue-500/30 cursor-wait"
             : !hasClips
               ? "bg-zinc-800 text-zinc-600 border border-zinc-700 cursor-not-allowed"
               : "bg-blue-600 text-white hover:bg-blue-500 border border-blue-500 active:scale-[0.98]",
         )}
       >
-        {generating ? (
+        {busy ? (
           <>
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             Generating Captions...
@@ -211,14 +202,14 @@ export function CaptionsPanel() {
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            {hasClips ? "Generate Captions" : "Add clips first"}
+            {hasClips ? "Apply Caption Style" : "Render a video first"}
           </>
         )}
       </button>
 
       {!hasClips && (
         <p className="text-[8px] text-zinc-600 text-center">
-          Add media to the timeline, then generate captions.
+          Render a video, then apply or remove captions.
         </p>
       )}
     </div>

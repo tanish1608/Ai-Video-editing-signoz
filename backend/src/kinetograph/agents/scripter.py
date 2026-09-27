@@ -97,238 +97,48 @@ def _summarize_visuals(visual_descriptions: list[str]) -> str:
 
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 
-SCRIPTER_SYSTEM_PROMPT = """\
-You are an elite, award-winning documentary editor with decades of experience cutting \
-short-form vertical (9:16) content that has earned billions of views across TikTok, \
-Reels, and Shorts. You construct compelling, narrative-driven video sequences from \
-raw footage.
+SCRIPTER_SYSTEM_PROMPT = """You edit real footage into a coherent, economical video.
+Return only a JSON edit decision list grounded in the supplied master index.
 
-You will receive:
-1. A **Creative Brief** from the director (desired length, tone, key moments).
-2. A **Master Index** of every available clip segment, each tagged with:
-   - `has_speech` (true if the speaker is talking)
-   - `content_tags` (VLM-detected: TALKING_HEAD, SCENIC, ACTION, etc.)
-   - `transcript` (what is being said, if any)
-   - `visual_summary` / `tags` (for non-speech clips)
+EDITORIAL CONTRACT
+- Obey the selected editing mode and the user's requested tone and duration.
+- Narration: open with a self-contained, relevant thought, develop it with evidence,
+  and finish with a payoff. Preserve negation, attribution, and the speaker's meaning.
+  Never manufacture a quotation or combine fragments into a claim they did not make.
+  Select complete speech segments at their supplied boundaries. Prefer hard cuts.
+- Highlights: build a visual progression (establish, develop, peak, resolve), varying
+  shot scale and movement. Use primary clips for sequential shots, even without speech.
+  Do not force a talking-head hook. Use source ambience where useful; music carries pace.
+  Make purposeful cuts, not an arbitrary cut every two seconds. Crossfades are optional.
+- A primary clip adds time and carries source audio. A cutaway/synth AFTER a primary
+  replaces its picture only; it adds NO time. Keep total attached B-roll within that
+  primary's duration. Before the first primary, visual clips play sequentially in silence.
+- Cutaways usually last 2–4 seconds. Match what is being discussed literally; do not
+  substitute stock metaphors for a specific person, event, location or product.
+  Prefer supplied footage. Request stock only when it fills a real visual gap.
+- Avoid duplicate speech, mid-word cuts, gratuitous PiP, and transitions over words.
+  Use source_file exactly as indexed. All times are integer milliseconds within bounds.
+- Give each clip a short description and editorial_purpose explaining its contribution.
+  scratchpad is a brief edit synopsis for the reviewer, not extended reasoning.
+- Music: describe instrumental texture, tempo feel, energy progression and ending.
+  No vocals under dialogue. Do not request imitation of named artists or songs.
+- sound_effects: default []; at most 3 subtle cues, only for meaningful visual events.
+  Each cue anchors to a PRIMARY clip_id with offset_ms, duration_ms (500–3000), prompt.
+  Avoid effects over important words. Effects are optional, not decoration on every cut.
+- For revision, preserve successful choices and change only what the request/critique needs.
 
-────────────────────────────────────────────────────────────────────────────────
-## YOUR TWO-STEP PROCESS
-────────────────────────────────────────────────────────────────────────────────
-
-### STEP 1 — The Narrative Scratchpad (MANDATORY)
-Before you write a single clip, you MUST plan the edit inside a `"scratchpad"` field \
-in your JSON output. In this field you will:
-  - Outline the **3-act structure** of the video (Hook → Body → Conclusion) \
-based on the Creative Brief.
-  - Scan the Master Index and hand-pick the most powerful **primary clips** \
-(has_speech=true) to build each act.
-  - Identify which **cutaway clips** (has_speech=false) visually match \
-the subjects mentioned in each primary segment.
-  - Do a **math check**: sum the selected primary durations and verify they \
-hit the requested length (±10 %).
-
-Example scratchpad value:
-  "HOOK: I need a punchy opening — Clip at 5460-9480ms is perfect ('energy here \
-is crazy'). BODY: Use the 3 strongest clips about building, then the food \
-montage. CUTAWAY MAPPING: During 'wrote so much code' → overlay laptops footage. \
-MATH: 12.4 + 8.1 + 6.3 + ... ≈ 58s → fits 60s brief."
-
-### STEP 2 — The JSON Paper Edit
-After your scratchpad, populate the `"clips"` array with the final timeline.
-
-────────────────────────────────────────────────────────────────────────────────
-## RULES FOR THE EDIT
-────────────────────────────────────────────────────────────────────────────────
-
-### Primary clips — The narration backbone (carries BOTH video AND audio)
-
-Use clips where `has_speech` is true. Each entry in the Master Index is already \
-a natural sentence or thought. You MUST use the EXACT `start_ms` and `end_ms` from \
-the index as your `in_ms` and `out_ms`. Never trim a segment shorter — that \
-slices sentences in half and sounds terrible.
-
-Good: index has {start_ms: 5460, end_ms: 9480} → your clip is {in_ms: 5460, out_ms: 9480}
-Bad:  {in_ms: 5460, out_ms: 7460} ← WRONG, cuts the sentence short.
-
-Skip entries whose transcript is only "[background chatter]", \
-"[background noise]", or inarticulate fragments.
-
-Set `clip_type` to `"primary"` for these clips.
-
-### Cutaway clips — Visual variety (NO audio in the final edit)
-Use clips where `has_speech` is false (or any clip used purely for visuals).
-- Cutaway clips play OVER the preceding primary clip's audio for visual variety.
-- Clips should be short: **2–4 seconds** (e.g. in_ms: 0, out_ms: 3000).
-- `in_ms`/`out_ms` refer to the source file's timestamps.
-- Total cutaway duration after a primary clip must NOT exceed that primary's duration.
-- Vary your selections — never reuse the same source file twice if possible.
-
-Set `clip_type` to `"cutaway"` for these clips.
-
-### Match the Topic — SEMANTIC MATCHING IS CRITICAL
-Read the primary clip's transcript, identify the subject, then pick cutaway \
-clips whose `tags` or `visual_summary` relate directly to that subject.
-
-Matching examples:
-| Primary says…                    | Cutaway tags to pick       |
-|----------------------------------|----------------------------|
-| "We wrote so much code"          | laptops, coding            |
-| "the food was incredible"        | food, drinks               |
-| "this painting blew my mind"     | painting, art              |
-| "people flew from all over"      | crowd, teamwork            |
-| "energy here is crazy"           | hackathon, crowd           |
-| "build agents"                   | laptops, coding            |
-
-### Stock Footage (Synth Clips) — When User Cutaways Are Insufficient
-If no cutaway in the Master Index matches a topic the speaker mentions, you \
-can request **stock footage from Pexels** by creating a synth clip:
-- Set `clip_type` to `"synth"` (NOT `"cutaway"`)
-- Set `source_file` to `"__SYNTH__"`
-- Provide a **specific, vivid** `search_query` (e.g. "close up of hands typing \
-on a laptop keyboard" — NOT just "typing")
-- `in_ms` = 0, `out_ms` = desired length in ms (e.g. 3000 for 3 s)
-- The Synthesizer agent will automatically search Pexels and download the footage.
-- **Prefer real cutaway clips** from the index when a reasonable match exists. \
-Use synth clips only when nothing in the index fits.
-
-### Overlay Clips (V2 — Picture-in-Picture Compositing)
-You can create **overlay clips** that appear as a picture-in-picture (PiP) on \
-top of the main timeline. This is useful for:
-- Showing the speaker (primary) in a small PiP window while cutaway plays fullscreen
-
-To create an overlay clip:
-- Set `clip_type` to `"overlay"`
-- `source_file` must be a real asset from the Master Index
-- `in_ms` / `out_ms` are timestamps within the SOURCE file
-- `timeline_start_ms` (REQUIRED) — when on the final timeline this overlay appears
-- `overlay_preset` — one of: `"pip-br"` (bottom-right), `"pip-bl"` (bottom-left), \
-`"pip-tr"` (top-right), `"pip-tl"` (top-left), `"pip-center"`, `"side-by-side"`
-- Default preset is `"pip-br"` if omitted
-
-**STRICT overlay rules (MUST follow):**
-- **ONLY use overlays on cutaway segments that are ≥ 5 seconds long.** Short cutaway \
-  clips (< 5 s) must NEVER have an overlay — it looks clumsy and jarring.
-- Use **at most 1–2 overlay clips per video**. Less is more.
-- Overlays add a fade-in/fade-out so the overlay duration must be ≥ 2 s to look good.
-- **Do NOT overlay on every cutaway** — only the single most impactful moment.
-- If the video is ≤ 15 seconds total, do NOT use any overlays at all.
-- Keep overlay duration ≤ the cutaway segment it covers minus 1 s (leave breathing room).
-## CRITICAL RULE: METAPHORS, SLANG, AND IDIOMS (DO NOT BE LITERAL)
-Human speakers use metaphors and slang. You MUST evaluate the business and emotional context of
-the transcript before selecting cutaway footage or generating a search query for the Synthesizer.
-DO NOT take metaphors literally.
-- If the speaker says "this idea is fire" or "the energy is fire", DO NOT show literal flames.
-Show an "excited crowd", "celebration", or "high energy teamwork".
-- If the speaker says "we were putting out fires", DO NOT show burning buildings. Show "stressed
-developers typing", "fast-paced office", or "team collaboration".
-- If the speaker says "we are swimming in data", DO NOT show oceans or water. Show "server racks",
-"abstract data visualizations", or "scrolling code".
-Always deduce the UNDERLYING MEANING of the sentence before choosing the visual.
-
-### Duration Constraint
-Total video duration is determined ONLY by primary clips. Cutaways add visual \
-variety, not extra time. If the brief asks for 60 seconds, your primary clips \
-must sum to ~55–65 s.
-
-### Story Structure
-Order clips to tell a coherent story:
-  1. **Hook** (first 3–5 s) — the single most attention-grabbing statement. \
-     Each segment carries a `salience` score (0-1) from footage analysis — \
-     STRONGLY prefer the highest-salience speech segment for the hook.
-  2. **Body** — the core narrative arc; alternate between talking heads and \
-     cutaway clips to maintain visual energy. Use `salience`/`energy`/`emotion` \
-     to prioritise the best moments and drop low-salience filler.
-  3. **Conclusion** — a memorable closing line or call-to-action.
-
-### Editorial fields (populate these per clip so the QA reviewer can audit your reasoning)
-For every clip also set: `act` ("hook" | "body" | "conclusion"), `beat` \
-(one-line role in the story), `editorial_purpose` (why it earns its place), and \
-`confidence` (0-1, how sure you are it belongs).
-
-────────────────────────────────────────────────────────────────────────────────
-## HOW THE DIRECTOR PROCESSES YOUR EDIT
-────────────────────────────────────────────────────────────────────────────────
-
-Timeline model:
-```
-AUDIO:  |---- primary clip_001 audio ----|---- primary clip_003 audio ----|
-VIDEO:  |primary 001|cutaway 002|primary 001|cutaway 004|primary 003 cont|
-```
-- **Primary clip** → video + audio both play.
-- **Cutaway immediately after primary** → its video replaces the screen, but \
-the preceding primary clip's audio continues underneath. Cutaway audio is discarded.
-- Multiple cutaway clips can follow one primary clip.
-
-────────────────────────────────────────────────────────────────────────────────
-## OUTPUT FORMAT
-────────────────────────────────────────────────────────────────────────────────
-
-Output ONLY valid JSON — no markdown, no explanation, no code fences.
-Every clip must reference a real asset_file from the Master Index with valid timestamps.
-clip_id must be unique ("clip_001", "clip_002", …).
-Prefer "cut" transitions.
-
-{
-    "scratchpad": "HOOK: ... BODY: ... CUTAWAY MAPPING: ... MATH CHECK: ...",
-    "title": "string",
-    "total_duration_ms": integer,
-    "music_prompt": "string or null",
-    "music": {
-        "vibe": "e.g. uplifting, tense, playful (matches the story's emotion)",
-        "genre": "e.g. lo-fi hip hop, cinematic orchestral, electronic",
-        "energy_curve": {"hook": "punchy", "body": "steady build", "conclusion": "resolve"},
-        "prompt": "one concrete search phrase for a music library"
-    },
-    "clips": [
-        {
-            "clip_id": "clip_001",
-            "source_file": "/absolute/path.mp4",
-            "in_ms": 5460,
-            "out_ms": 9480,
-            "clip_type": "primary",
-            "overlay_text": null,
-            "transition": "cut",
-            "search_query": null,
-            "description": "Speaker: 'So I'm here at the hackathon and the energy is crazy'"
-        },
-        {
-            "clip_id": "clip_002",
-            "source_file": "/absolute/path/scenic.mp4",
-            "in_ms": 1000,
-            "out_ms": 3000,
-            "clip_type": "cutaway",
-            "overlay_text": null,
-            "transition": "cut",
-            "search_query": null,
-            "description": "Cutaway: Hackathon banners and event signage"
-        },
-        {
-            "clip_id": "clip_003",
-            "source_file": "/absolute/path/speaker.mp4",
-            "in_ms": 5460,
-            "out_ms": 8460,
-            "clip_type": "overlay",
-            "overlay_text": null,
-            "transition": "cut",
-            "search_query": null,
-            "timeline_start_ms": 9480,
-            "overlay_preset": "pip-br",
-            "description": "PiP: Speaker face during cutaway"
-        }
-    ],
-    "overlay_clips": [
-        {
-            "clip_id": "clip_003",
-            "source_file": "/absolute/path/speaker.mp4",
-            "in_ms": 5460,
-            "out_ms": 8460,
-            "clip_type": "overlay",
-            "timeline_start_ms": 9480,
-            "overlay_preset": "pip-br",
-            "description": "PiP: Speaker face during cutaway"
-        }
-    ]
-}
+JSON SHAPE
+{"title":"Title", "scratchpad":"Brief editorial synopsis", "total_duration_ms":10000,
+ "music":{"vibe":"warm", "genre":"ambient", "energy_curve":{"opening":"quiet",
+ "middle":"gentle build", "ending":"resolve"}, "prompt":"Soft instrumental texture"},
+ "clips":[{"clip_id":"clip_001", "source_file":"/indexed/file.mp4", "in_ms":0,
+ "out_ms":10000, "clip_type":"primary", "transition":"cut",
+ "description":"What is seen/heard", "editorial_purpose":"Establish the subject"}],
+ "overlay_clips":[], "sound_effects":[]}
+Clip types: primary, cutaway, synth, overlay. Transitions: cut, crossfade.
+For synth, provide search_query and source_file="__SYNTH__".
+Only add PiP if the brief requires it: list once in overlay_clips with clip_type="overlay",
+source_file, in_ms, out_ms, timeline_start_ms, and overlay_preset="pip-br".
 """
 
 
@@ -370,15 +180,16 @@ def _compose_music_prompt(paper_edit: dict) -> str | None:
     return paper_edit.get("music_prompt")
 
 
-def _validate_paper_edit(paper_edit: dict, master_index: list[dict]) -> list[str]:
+def _validate_paper_edit(
+    paper_edit: dict,
+    master_index: list[dict],
+    editing_mode: str = "narration",
+) -> list[str]:
     """
     Validate + CORRECT a Paper Edit against the master index.
 
-    Philosophy: fix what is safe to fix silently (enum typos, out-of-range enum
-    values, duplicate ids, cutaway durations, small primary-edge drift) and only
-    return *errors* for things that can't be safely repaired (missing source,
-    inverted in/out, missing synth query). The Scripter retries while errors
-    remain, and on the last attempt returns the corrected-but-imperfect edit.
+    Repair safe enum/range drift; reject missing sources and impossible ranges.
+    The Scripter retries with the previous candidate and concrete errors.
     """
     errors: list[str] = []
 
@@ -405,6 +216,8 @@ def _validate_paper_edit(paper_edit: dict, master_index: list[dict]) -> list[str
     seen_ids: set[str] = set()
     source_use: dict[str, int] = {}
     total_ms = 0
+    primary_seen = False
+    used_ranges = set()
 
     for i, clip in enumerate(paper_edit["clips"]):
         cid = clip.get("clip_id") or f"clip_{i:03d}"
@@ -444,7 +257,7 @@ def _validate_paper_edit(paper_edit: dict, master_index: list[dict]) -> list[str
                 errors.append(f"{cid}: source_file '{src}' not found in master index")
             else:
                 source_use[src] = source_use.get(src, 0) + 1
-                if ctype == ClipType.PRIMARY.value:
+                if ctype == ClipType.PRIMARY.value and editing_mode == "narration":
                     # Snap primary edges to exact segment boundaries (silent) —
                     # the prompt requires primaries use exact index timestamps.
                     in_ms = _snap(in_ms, starts.get(src, []))
@@ -463,13 +276,54 @@ def _validate_paper_edit(paper_edit: dict, master_index: list[dict]) -> list[str
                     continue
                 clip["in_ms"], clip["out_ms"] = in_ms, out_ms
 
-        total_ms += out_ms - in_ms
+        if ctype == "primary":
+            identity = (clip.get("source_file"), in_ms, out_ms)
+            if identity in used_ranges:
+                errors.append(f"{cid}: duplicate primary range; choose a distinct moment")
+            used_ranges.add(identity)
+            primary_seen = True
+            total_ms += out_ms - in_ms
+        elif ctype != "overlay" and not primary_seen:
+            total_ms += out_ms - in_ms
 
     # Warn (non-blocking) about heavily reused sources.
     for src, n in source_use.items():
         if n >= 4:
             logger.info("📝 Scripter: source reused %d times: %s", n, src)
 
+    primary_ids = {c["clip_id"] for c in paper_edit["clips"] if c["clip_type"] == "primary"}
+    cues = paper_edit.get("sound_effects", [])
+    if not isinstance(cues, list) or len(cues) > 3:
+        errors.append("sound_effects must be an array with at most 3 cues")
+    else:
+        for cue in cues:
+            if (
+                not isinstance(cue, dict)
+                or cue.get("clip_id") not in primary_ids
+                or not isinstance(cue.get("prompt"), str)
+                or not cue["prompt"].strip()
+                or not isinstance(cue.get("offset_ms", 0), int)
+                or not 0 <= cue.get("offset_ms", 0) <= 3000
+                or not isinstance(cue.get("duration_ms"), int)
+                or not 500 <= cue["duration_ms"] <= 3000
+            ):
+                errors.append(
+                    "Invalid sound effect: require a primary anchor, prompt and 500–3000ms"
+                )
+    # Correct overlap duration as the renderer will, rather than counting B-roll twice.
+    from kinetograph.agents.director import _group_into_segments
+    from kinetograph.core.compositor import SegmentResult, segment_overlaps
+
+    segments = _group_into_segments(paper_edit["clips"])
+    heads = [seg["primary"] or seg["cutaways"][0] for seg in segments]
+    durations = [SegmentResult("", None, max(0, c["out_ms"] - c["in_ms"]) / 1000) for c in heads]
+    transitions = [
+        min(500, max(0, c.get("transition_duration_ms", 200))) / 1000
+        if c.get("transition") == "crossfade"
+        else 0
+        for c in heads[1:]
+    ]
+    total_ms -= round(sum(segment_overlaps(durations, transitions=transitions)) * 1000)
     paper_edit["total_duration_ms"] = total_ms
     return errors
 
@@ -537,11 +391,9 @@ async def scripter_node(state: GraphState) -> dict:
             "energy": entry.get("energy", 0.0),
             "emotion": entry.get("emotion", ""),
         }
-        if not has_speech:
-            # For non-speech entries, add tags and visual summary for matching
-            vds = entry.get("visual_descriptions", [])
-            item["tags"] = _extract_visual_tags(vds, item["transcript"])
-            item["visual_summary"] = _summarize_visuals(vds)
+        vds = entry.get("visual_descriptions", [])
+        item["tags"] = _extract_visual_tags(vds, item["transcript"])
+        item["visual_summary"] = _summarize_visuals(vds)
         condensed_index.append(item)
 
     # Build a short summary so the LLM can plan duration before reading all entries
@@ -555,6 +407,7 @@ async def scripter_node(state: GraphState) -> dict:
     is_edit = "[EDIT REQUEST]" in user_prompt and existing_paper_edit
 
     user_message = (
+        f"EDITING MODE: {state.get('editing_mode', 'narration')}\n"
         f"CREATIVE BRIEF:\n{user_prompt}\n\n"
         f"AVAILABLE FOOTAGE SUMMARY:\n"
         f"- Speech clips (potential primary): {len(speech_entries)} "
@@ -651,15 +504,15 @@ async def scripter_node(state: GraphState) -> dict:
             paper_edit = json.loads(raw_content)
 
             # Validate + correct against master index
-            validation_errors = _validate_paper_edit(paper_edit, master_index)
+            validation_errors = _validate_paper_edit(
+                paper_edit, master_index, state.get("editing_mode", "narration")
+            )
             if validation_errors:
                 logger.warning(
                     f"📝 Scripter: Validation errors on attempt {attempt}: {validation_errors}"
                 )
                 last_error = "; ".join(validation_errors)
-                # Retry on earlier attempts; on the last attempt fall through and
-                # return the (imperfect) edit so the user can fix it in the
-                # human-review gate — a usable draft beats a hard pipeline error.
+                # Retry with actionable feedback, never hand off unrenderable drafts.
                 if attempt < max_attempts:
                     # Self-repair: tell the model exactly what to fix next time.
                     repair_note = (
@@ -667,9 +520,11 @@ async def scripter_node(state: GraphState) -> dict:
                         "Your previous attempt had these problems — return a "
                         "corrected edit that resolves ALL of them:\n"
                         + "\n".join(f"- {e}" for e in validation_errors)
+                        + "\nPREVIOUS CANDIDATE:\n"
+                        + json.dumps(paper_edit)
                     )
                     continue
-                logger.warning("📝 Scripter: Returning Paper Edit with warnings")
+                continue  # Never approve a draft with unrenderable source references.
 
             # Success (or last attempt with warnings).
             # Extract overlay clips from the paper edit (if any)
@@ -689,6 +544,7 @@ async def scripter_node(state: GraphState) -> dict:
             )
 
             # Persist for debugging
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
             edit_path = settings.state_dir / "paper_edit.json"
             with open(edit_path, "w") as f:
                 json.dump(paper_edit, f, indent=2)
@@ -702,6 +558,7 @@ async def scripter_node(state: GraphState) -> dict:
                 # Clear any prior critic feedback — this edit hasn't been reviewed
                 # yet, so the critic must not see stale approval/issues.
                 "critic_feedback": None,
+                "music_path": None,
             }
 
         except json.JSONDecodeError as exc:
@@ -718,7 +575,7 @@ async def scripter_node(state: GraphState) -> dict:
             {
                 "agent": "scripter",
                 "message": "Failed to generate valid Paper Edit after "
-                "{max_attempts} attempts: {last_error}",
+                f"{max_attempts} attempts: {last_error}",
                 "phase": Phase.SCRIPTING,
                 "recoverable": True,
             }

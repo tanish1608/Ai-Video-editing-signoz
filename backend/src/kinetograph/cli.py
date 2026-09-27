@@ -336,6 +336,69 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
         raise
 
 
+def show_runs(project: str | None, run_id: str | None, limit: int, tail: int) -> None:
+    """Print past pipeline runs (from <project>/logs/runs) as a table, or one run in detail."""
+    from rich.markup import escape
+    from rich.table import Table
+
+    from kinetograph import runlog
+
+    def local_time(iso: str | None) -> str:
+        try:
+            return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return ""
+
+    if project:
+        settings.kinetograph_project_dir = str(Path(project).expanduser().resolve())
+
+    if run_id:
+        run = runlog.read_run(run_id, tail=tail)
+        if run is None:
+            console.print(f"[red]No log for run {run_id} in {runlog.runs_dir()}[/red]")
+            sys.exit(1)
+        console.print(f"[bold]Run {run['run_id']}[/bold]  status=[bold]{run.get('status')}[/bold]")
+        for key in ("started_at", "ended_at", "duration_s", "prompt", "models", "api_keys"):
+            if run.get(key) is not None:
+                console.print(f"  [dim]{key}:[/dim] {run[key]}")
+        table = Table("node", "phase", "seconds")
+        for n in run.get("nodes", []):
+            table.add_row(n["node"], n["phase"], f"{n['duration_s']:.1f}")
+        console.print(table)
+        for err in run.get("errors", []):
+            agent, message = err.get("agent", "?"), err.get("message", "")
+            console.print(f"  [red]✗[/red] {escape(f'[{agent}] {message}')}")
+        if run.get("error"):
+            console.print(f"  [red]✗[/red] {escape(run['error'])}")
+        console.print(f"\n[dim]── backend.log (last {tail} lines) · {run['log_dir']}[/dim]")
+        for line in run.get("log_tail", []):
+            console.print(line, markup=False, highlight=False)
+        return
+
+    runs = runlog.list_runs(limit)
+    if not runs:
+        console.print(f"[dim]No runs logged in {runlog.runs_dir()}[/dim]")
+        return
+    table = Table("started", "run id", "status", "secs", "slowest node", "first error / prompt")
+    for r in runs:
+        nodes = r.get("nodes") or []
+        slowest = max(nodes, key=lambda n: n["duration_s"], default=None)
+        errs = r.get("errors") or []
+        detail = (errs[0].get("message") if errs else r.get("error")) or r.get("prompt") or ""
+        status = r.get("status", "?")
+        colour = {"complete": "green", "error": "red", "cancelled": "yellow"}.get(status, "cyan")
+        table.add_row(
+            local_time(r.get("started_at")),
+            r["run_id"][:12],
+            f"[{colour}]{status}[/{colour}]",
+            str(r.get("duration_s", "")),
+            f"{slowest['node']} ({slowest['duration_s']:.0f}s)" if slowest else "",
+            escape(detail.replace("\n", " ")[:70]),
+        )
+    console.print(table)
+    console.print("[dim]Details: kinetograph runs <run id>[/dim]")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="kinetograph",
@@ -383,9 +446,21 @@ def main():
     serve_parser = sub.add_parser("serve", help="Start the web UI server")
     serve_parser.add_argument("--verbose", "-v", action="store_true")
 
+    # `kinetograph runs`
+    runs_parser = sub.add_parser("runs", help="List / inspect logged pipeline runs")
+    runs_parser.add_argument("run_id", nargs="?", help="Show one run in detail")
+    runs_parser.add_argument(
+        "--project", type=str, default=None, help="Project directory (default: current settings)"
+    )
+    runs_parser.add_argument("--limit", type=int, default=20)
+    runs_parser.add_argument("--tail", type=int, default=60, help="backend.log lines to show")
+
     args = parser.parse_args()
 
-    if args.command == "run":
+    if args.command == "runs":
+        show_runs(args.project, args.run_id, args.limit, args.tail)
+
+    elif args.command == "run":
         _setup_logging(args.verbose)
         _print_banner()
 

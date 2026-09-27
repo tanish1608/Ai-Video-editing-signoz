@@ -139,6 +139,32 @@ class Settings(BaseSettings):
     def state_dir(self) -> Path:
         return self._project_root / "state"
 
+    @property
+    def logs_dir(self) -> Path:
+        """Per-run logs (see kinetograph.runlog)."""
+        return self._project_root / "logs"
+
+    def reload_secrets(self) -> None:
+        """Re-read API keys and model names from the env file.
+
+        The desktop Settings page rewrites the env file on Save; without this the
+        running backend would keep the keys it loaded at startup until restarted.
+        Runtime-mutated fields (project dir, output size) are left untouched.
+        """
+        fresh = Settings()
+        for name in (
+            "gemini_api_key",
+            "hf_token",
+            "elevenlabs_api_key",
+            "nvidia_api_key",
+            "soundstripe_api_key",
+            "pexels_api_key",
+            "gemini_model",
+            "vlm_model",
+            "vlm_base_url",
+        ):
+            setattr(self, name, getattr(fresh, name))
+
     # ── Media Cache (Adobe-style persistent cache) ────────────────
     @property
     def cache_dir(self) -> Path:

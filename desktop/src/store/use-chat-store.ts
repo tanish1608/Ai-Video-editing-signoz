@@ -51,7 +51,7 @@ interface ChatState {
 	addAgentUpdate: (agent: string, phase: Phase, content: string) => string;
 	addApprovalRequest: (paperEdit: PaperEdit) => string;
 	addPipelineComplete: (renderPath?: string, timelinePath?: string) => string;
-	addPipelineError: (errors: PipelineError[], content: string) => string;
+	addPipelineError: (errors: PipelineError[], content: string, logDir?: string) => string;
 	addCaptionStyleRequest: (styles: CaptionStylePreset[]) => string;
 	addLoadingMessage: () => string;
 	removeLoadingMessages: () => void;
@@ -192,7 +192,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 		return id;
 	},
 
-	addPipelineError: (errors, content) => {
+	addPipelineError: (errors, content, logDir) => {
 		const id = chatId();
 		set((state) => ({
 			messages: [
@@ -203,6 +203,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 					type: "pipeline-error" as ChatMessageType,
 					content,
 					errors,
+					logDir,
 					timestamp: Date.now(),
 				},
 			],
