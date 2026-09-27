@@ -1,8 +1,8 @@
 [project]
 name = "kinetograph"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Autonomous Multi-Agent Video Orchestration Engine"
-readme = "README.md"
+readme = {text = "Kinetograph desktop video editor backend", content-type = "text/plain"}
 requires-python = ">=3.11"
 license = { text = "MIT" }
 
@@ -13,11 +13,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "langchain-core>=0.3.0",
     "google-genai>=1.65.0",
-    "huggingface-hub>=0.27.0",
     "elevenlabs>=1.20.0",
-
-    # Media processing
-    "av>=14.0.0",
 
     # Timeline export
     "opentimelineio>=0.17.0",
@@ -39,7 +35,6 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "rich>=13.9.0",
-    "aiofiles>=24.1.0",
     "watchfiles>=1.0.0",
 
     # Observability — OpenTelemetry traces/metrics exported to SigNoz (OTLP)
@@ -74,3 +69,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

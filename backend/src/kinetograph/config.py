@@ -11,8 +11,9 @@ from typing import Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-_ROOT = Path(__file__).resolve().parents[3]  # repo root: backend/src/kinetograph/config.py → src → backend → repo root
+_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # repo root: backend/src/kinetograph/config.py → src → backend → repo root
 _ENV_FILE = os.environ.get("KINETOGRAPH_ENV_FILE", str(_ROOT / ".env"))
 
 
@@ -41,8 +42,12 @@ class Settings(BaseSettings):
 
     # ── Strip whitespace from API keys (.env values may have leading spaces) ──
     @field_validator(
-        "gemini_api_key", "hf_token", "elevenlabs_api_key",
-        "nvidia_api_key", "soundstripe_api_key", "pexels_api_key",
+        "gemini_api_key",
+        "hf_token",
+        "elevenlabs_api_key",
+        "nvidia_api_key",
+        "soundstripe_api_key",
+        "pexels_api_key",
         mode="before",
     )
     @classmethod
@@ -50,19 +55,26 @@ class Settings(BaseSettings):
         return v.strip() if isinstance(v, str) else v
 
     # ── Model Configuration ────────────────────────────
-    gemini_model: str = "gemini-2.5-flash-preview-05-20"
+    gemini_model: str = "gemini-3.8-flash"
     vlm_model: str = "nvidia/nemotron-nano-12b-v2-vl"
     vlm_base_url: str = "https://integrate.api.nvidia.com"
     elevenlabs_stt_model: str = "scribe_v2"
 
+    @field_validator("gemini_model")
+    @classmethod
+    def _migrate_retired_model(cls, value: str) -> str:
+        if value == "gemini-2.5-flash-preview-05-20":
+            return "gemini-3.8-flash"
+        return value
+
     # ── VLM Pipeline Tuning ────────────────────────────
-    vlm_concurrency: int = 5         # parallel VLM requests
-    vlm_segment_sec: float = 4.0     # seconds per video segment
-    vlm_segment_fps: float = 2.0     # frame extraction rate (model spec)
-    vlm_max_frames: int = 8          # max frames per segment (model min)
+    vlm_concurrency: int = 5  # parallel VLM requests
+    vlm_segment_sec: float = 4.0  # seconds per video segment
+    vlm_segment_fps: float = 2.0  # frame extraction rate (model spec)
+    vlm_max_frames: int = 8  # max frames per segment (model min)
 
     # ── Media Settings ─────────────────────────────────
-    output_orientation: str = "portrait"   # "portrait" (9:16) or "landscape" (16:9)
+    output_orientation: str = "portrait"  # "portrait" (9:16) or "landscape" (16:9)
     output_width_override: Optional[int] = Field(None, validation_alias="OUTPUT_WIDTH", gt=0)
     output_height_override: Optional[int] = Field(None, validation_alias="OUTPUT_HEIGHT", gt=0)
     output_fps: int = 30
@@ -90,6 +102,7 @@ class Settings(BaseSettings):
     # ── Server ─────────────────────────────────────────
     api_host: str = "127.0.0.1"
     api_port: int = 8080
+    kinetograph_api_token: str = ""
 
     # ── Project Directory ──────────────────────────────
     # Set by Electron via KINETOGRAPH_PROJECT_DIR env var when a user

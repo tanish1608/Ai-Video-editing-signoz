@@ -28,7 +28,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   nvidiaApiKey: "",
   pexelsApiKey: "",
   soundstripeApiKey: "",
-  geminiModel: "gemini-2.5-flash-preview-05-20",
+  geminiModel: "gemini-3.8-flash",
   vlmModel: "nvidia/nemotron-nano-12b-v2-vl",
   vlmBaseUrl: "https://integrate.api.nvidia.com",
   outputWidth: 1080,

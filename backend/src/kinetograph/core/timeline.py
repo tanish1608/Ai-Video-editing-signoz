@@ -83,12 +83,20 @@ def build_otio_timeline(
             duration=RationalTime(duration_ms / 1000.0 * fps, fps),
         )
 
-        video_track.append(otio.schema.Clip(
-            name=clip_id, media_reference=media_ref, source_range=source_range,
-        ))
-        audio_track.append(otio.schema.Clip(
-            name=f"{clip_id}_audio", media_reference=media_ref, source_range=source_range,
-        ))
+        video_track.append(
+            otio.schema.Clip(
+                name=clip_id,
+                media_reference=media_ref,
+                source_range=source_range,
+            )
+        )
+        audio_track.append(
+            otio.schema.Clip(
+                name=f"{clip_id}_audio",
+                media_reference=media_ref,
+                source_range=source_range,
+            )
+        )
 
     timeline.tracks.append(video_track)
     timeline.tracks.append(audio_track)
@@ -140,10 +148,17 @@ def export_fcpxml(timeline: Any, output_path: str | Path) -> Path:
         duration_ms = clip["out_ms"] - clip["in_ms"]
         duration_s = f"{duration_ms / 1000:.3f}s"
         asset = ET.SubElement(
-            resources, "asset",
-            id=f"r{i + 1}", start="0s", duration=duration_s,
-            hasVideo="1", hasAudio="1", format="r0",
-            audioSources="1", audioChannels="2", audioRate="48000",
+            resources,
+            "asset",
+            id=f"r{i + 1}",
+            start="0s",
+            duration=duration_s,
+            hasVideo="1",
+            hasAudio="1",
+            format="r0",
+            audioSources="1",
+            audioChannels="2",
+            audioRate="48000",
         )
         asset.append(_media_rep(clip["file_path"]))
 
@@ -157,9 +172,13 @@ def export_fcpxml(timeline: Any, output_path: str | Path) -> Path:
         duration_ms = clip["out_ms"] - clip["in_ms"]
         duration_s = f"{duration_ms / 1000:.3f}s"
         ET.SubElement(
-            spine, "asset-clip",
-            name=clip["clip_id"], ref=f"r{i + 1}",
-            start=in_s, duration=duration_s, audioRole="dialogue",
+            spine,
+            "asset-clip",
+            name=clip["clip_id"],
+            ref=f"r{i + 1}",
+            start=in_s,
+            duration=duration_s,
+            audioRole="dialogue",
         )
 
     tree = ET.ElementTree(fcpxml)

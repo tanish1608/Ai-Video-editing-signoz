@@ -53,3 +53,13 @@ desktop/release/
 # SQLite checkpoints
 *.db
 *.sqlite
+
+# Runtime snapshots and database sidecars
+state/*
+!state/.gitkeep
+*.sqlite-*
+*.db-*
+*.yjs
+.pytest_cache/
+.ruff_cache/
+*.spec

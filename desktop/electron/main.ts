@@ -1,18 +1,27 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
+import { randomBytes } from "node:crypto";
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
 const BACKEND_PORT = 8080;
-const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const HEALTH_ENDPOINT = `${BACKEND_URL}/api/health`;
 const HEALTH_POLL_MS = 500;
 const HEALTH_TIMEOUT_MS = 30_000;
 
-const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
+const isDev = !app.isPackaged;
+const externalBackend = isDev && process.env.KINETOGRAPH_EXTERNAL_BACKEND === "1";
+const backendToken = externalBackend ? (process.env.KINETOGRAPH_API_TOKEN ?? "") : randomBytes(32).toString("hex");
+const backendHeaders = { "X-Kinetograph-Token": backendToken };
+
+function setBackendStatus(status: typeof backendStatus): void {
+  backendStatus = status;
+  mainWindow?.webContents.send("backend-status", status);
+}
 
 // ─── State ──────────────────────────────────────────────────────────────────────
 
@@ -36,7 +45,7 @@ function isSafeExternalUrl(value: unknown): value is string {
 function getPythonCommand(): { cmd: string; args: string[] } {
   if (isDev) {
     // In development, use the venv python from the repo root
-    const venvPython = path.join(__dirname, "..", "..", ".venv", "bin", "python3");
+    const venvPython = path.join(__dirname, "..", "..", ".venv", ...(process.platform === "win32" ? ["Scripts", "python.exe"] : ["bin", "python3"]));
     if (fs.existsSync(venvPython)) {
       return {
         cmd: venvPython,
@@ -64,7 +73,8 @@ function getPythonCommand(): { cmd: string; args: string[] } {
 
 async function isBackendAlreadyRunning(): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get(HEALTH_ENDPOINT, (res) => {
+    const req = http.get(HEALTH_ENDPOINT, { headers: backendHeaders }, (res) => {
+      res.resume();
       resolve(res.statusCode === 200);
     });
     req.on("error", () => resolve(false));
@@ -73,7 +83,8 @@ async function isBackendAlreadyRunning(): Promise<boolean> {
 }
 
 function startBackend(): void {
-  if (pythonProcess) return;
+  if (pythonProcess || externalBackend) return;
+  setBackendStatus("starting");
 
   let command: { cmd: string; args: string[] };
   try {
@@ -85,7 +96,7 @@ function startBackend(): void {
     return;
   }
   const { cmd, args } = command;
-  const cwd = isDev ? path.join(__dirname, "..", "..") : process.resourcesPath;
+  const cwd = isDev ? path.join(__dirname, "..", "..") : app.getPath("userData");
   const envPath = isDev ? path.join(__dirname, "..", "..", ".env") : path.join(app.getPath("userData"), ".env");
 
   console.log(`[Kinetograph] Starting backend: ${cmd} ${args.join(" ")}`);
@@ -95,92 +106,76 @@ function startBackend(): void {
     ...process.env as Record<string, string>,
     PYTHONDONTWRITEBYTECODE: "1",
     KINETOGRAPH_ENV_FILE: envPath,
+    KINETOGRAPH_API_TOKEN: backendToken,
+    API_HOST: "127.0.0.1",
+    API_PORT: String(BACKEND_PORT),
+    // GUI launches on macOS do not inherit the user's shell PATH.
+    PATH: [process.env.PATH ?? "", "/opt/homebrew/bin", "/usr/local/bin"].join(path.delimiter),
   };
 
   // If a project dir is set, pass it to the backend
-  if (currentProjectDir) {
-    env.KINETOGRAPH_PROJECT_DIR = currentProjectDir;
+  if (currentProjectDir || !isDev) {
+    env.KINETOGRAPH_PROJECT_DIR = currentProjectDir ?? path.join(app.getPath("userData"), "workspace");
+    fs.mkdirSync(env.KINETOGRAPH_PROJECT_DIR, { recursive: true });
   }
 
-  pythonProcess = spawn(cmd, args, {
+  const child = spawn(cmd, args, {
     cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  pythonProcess.stdout?.on("data", (data: Buffer) => {
+  pythonProcess = child;
+  child.stdout?.on("data", (data: Buffer) => {
     const msg = data.toString().trim();
     if (msg) console.log(`[Backend] ${msg}`);
     mainWindow?.webContents.send("backend-log", msg);
   });
 
-  pythonProcess.stderr?.on("data", (data: Buffer) => {
+  child.stderr?.on("data", (data: Buffer) => {
     const msg = data.toString().trim();
     if (msg) console.error(`[Backend] ${msg}`);
     mainWindow?.webContents.send("backend-log", msg);
   });
 
-  pythonProcess.on("exit", (code, signal) => {
+  child.on("exit", (code, signal) => {
     console.log(`[Kinetograph] Backend exited: code=${code}, signal=${signal}`);
-    pythonProcess = null;
-    mainWindow?.webContents.send("backend-status", "stopped");
+    if (pythonProcess === child) {
+      pythonProcess = null;
+      setBackendStatus(code ? "error" : "stopped");
+    }
   });
 
-  pythonProcess.on("error", (err) => {
+  child.on("error", (err) => {
     console.error(`[Kinetograph] Failed to start backend:`, err);
-    pythonProcess = null;
-    mainWindow?.webContents.send("backend-status", "error");
+    if (pythonProcess === child) {
+      pythonProcess = null;
+      setBackendStatus("error");
+    }
   });
 }
 
-function stopBackend(): void {
-  if (!pythonProcess) return;
-  console.log("[Kinetograph] Stopping backend...");
-  // Capture THIS specific child so a later restart (which reassigns
-  // pythonProcess to a new child) is never SIGKILLed by this timer.
-  const proc = pythonProcess;
-  proc.kill("SIGTERM");
-  const forceKill = setTimeout(() => {
-    proc.kill("SIGKILL");
-  }, 5000);
-  // If it exits cleanly first, cancel the force-kill and clear the ref.
-  proc.once("exit", () => {
-    clearTimeout(forceKill);
-    if (pythonProcess === proc) pythonProcess = null;
+async function stopBackend(): Promise<void> {
+  const child = pythonProcess;
+  if (!child) return;
+  await new Promise<void>((resolve) => {
+    const forceKill = setTimeout(() => child.kill("SIGKILL"), 5000);
+    child.once("exit", () => { clearTimeout(forceKill); resolve(); });
+    child.kill("SIGTERM");
   });
 }
 
-function waitForBackend(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-
-    const poll = () => {
-      if (Date.now() - start > HEALTH_TIMEOUT_MS) {
-        console.error("[Kinetograph] Backend health check timed out");
-        resolve(false);
-        return;
-      }
-
-      const req = http.get(HEALTH_ENDPOINT, (res) => {
-        if (res.statusCode === 200) {
-          resolve(true);
-        } else {
-          setTimeout(poll, HEALTH_POLL_MS);
-        }
-      });
-
-      req.on("error", () => {
-        setTimeout(poll, HEALTH_POLL_MS);
-      });
-
-      req.setTimeout(5000, () => {
-        req.destroy();
-        setTimeout(poll, HEALTH_POLL_MS);
-      });
-    };
-
-    poll();
-  });
+async function waitForBackend(): Promise<boolean> {
+  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await isBackendAlreadyRunning()) {
+      setBackendStatus("running");
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
+  }
+  setBackendStatus("error");
+  return false;
 }
 
 // ─── Window ─────────────────────────────────────────────────────────────────────
@@ -201,6 +196,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: true,
+      sandbox: true,
     },
   });
 
@@ -219,6 +215,8 @@ function createWindow(): void {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+
+  mainWindow.webContents.on("will-navigate", (event) => event.preventDefault());
 
   // Open external links in browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -311,11 +309,11 @@ function createMenu(): void {
       submenu: [
         {
           label: "GitHub Repository",
-          click: () => shell.openExternal("https://github.com/kinetograph/kinetograph"),
+          click: () => shell.openExternal("https://github.com/tanish1608/Ai-Video-editing-signoz"),
         },
         {
           label: "Report Issue",
-          click: () => shell.openExternal("https://github.com/kinetograph/kinetograph/issues"),
+          click: () => shell.openExternal("https://github.com/tanish1608/Ai-Video-editing-signoz/issues"),
         },
       ],
     },
@@ -327,26 +325,44 @@ function createMenu(): void {
 // ─── IPC Handlers ───────────────────────────────────────────────────────────────
 
 /** Tell the running backend to switch all paths to a project directory. */
-async function notifyBackendProjectDir(projectDir: string): Promise<void> {
+let switchingProject = false;
+
+async function openProjectDirectory(projectDir: string): Promise<string | null> {
+  if (switchingProject) return null;
+  switchingProject = true;
   try {
-    const res = await new Promise<boolean>((resolve) => {
+    ensureProjectStructure(projectDir);
+    await new Promise<void>((resolve, reject) => {
       const postData = JSON.stringify({ project_dir: projectDir });
-      const req = http.request(
-        `${BACKEND_URL}/api/project/set-dir`,
-        { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) } },
-        (res) => resolve(res.statusCode === 200),
-      );
-      req.on("error", () => resolve(false));
-      req.write(postData);
-      req.end();
+      const req = http.request(`${BACKEND_URL}/api/project/set-dir`, {
+        method: "POST",
+        headers: { ...backendHeaders, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => {
+          if (res.statusCode === 200) resolve();
+          else {
+            let detail = `Engine returned HTTP ${res.statusCode}`;
+            try { detail = JSON.parse(body).detail ?? detail; } catch { /* non-JSON error */ }
+            reject(new Error(detail));
+          }
+        });
+      });
+      req.on("error", reject);
+      req.setTimeout(10_000, () => req.destroy(new Error("Project switch timed out")));
+      req.end(postData);
     });
-    if (res) {
-      console.log(`[Kinetograph] Backend switched to project: ${projectDir}`);
-    } else {
-      console.warn(`[Kinetograph] Backend failed to switch project dir`);
-    }
-  } catch (err) {
-    console.warn("[Kinetograph] Could not notify backend of project dir:", err);
+    currentProjectDir = projectDir;
+    mainWindow?.webContents.send("project-opened", projectDir);
+    return projectDir;
+  } catch (error) {
+    await dialog.showMessageBox(mainWindow!, {
+      type: "error", message: "Could not open project", detail: String(error),
+    });
+    return null;
+  } finally {
+    switchingProject = false;
   }
 }
 
@@ -359,17 +375,7 @@ async function handleOpenProject(): Promise<string | null> {
 
   if (result.canceled || result.filePaths.length === 0) return null;
 
-  const projectDir = result.filePaths[0];
-  currentProjectDir = projectDir;
-
-  // Create project structure if it doesn't exist
-  ensureProjectStructure(projectDir);
-
-  // Tell the running backend to switch to this project directory
-  await notifyBackendProjectDir(projectDir);
-
-  mainWindow?.webContents.send("project-opened", projectDir);
-  return projectDir;
+  return openProjectDirectory(result.filePaths[0]);
 }
 
 async function handleNewProject(): Promise<string | null> {
@@ -384,14 +390,7 @@ async function handleNewProject(): Promise<string | null> {
   const projectDir = result.filePath;
   fs.mkdirSync(projectDir, { recursive: true });
 
-  currentProjectDir = projectDir;
-  ensureProjectStructure(projectDir);
-
-  // Tell the running backend to switch to this project directory
-  await notifyBackendProjectDir(projectDir);
-
-  mainWindow?.webContents.send("project-opened", projectDir);
-  return projectDir;
+  return openProjectDirectory(projectDir);
 }
 
 function ensureProjectStructure(dir: string): void {
@@ -443,6 +442,12 @@ async function handleImportMedia(): Promise<string[]> {
 function setupIPC(): void {
   ipcMain.handle("open-project", handleOpenProject);
   ipcMain.handle("new-project", handleNewProject);
+  ipcMain.handle("open-recent-project", (_event, projectDir: unknown) => {
+    if (typeof projectDir !== "string" || !path.isAbsolute(projectDir) || !fs.existsSync(projectDir)) {
+      throw new Error("Project directory does not exist");
+    }
+    return openProjectDirectory(projectDir);
+  });
   ipcMain.handle("import-media", handleImportMedia);
 
   ipcMain.handle("get-backend-url", () => BACKEND_URL);
@@ -475,15 +480,21 @@ function setupIPC(): void {
 
   ipcMain.handle("save-settings", (_event, settings: Record<string, unknown>) => {
     const settingsPath = path.join(app.getPath("userData"), "settings.json");
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
 
     // Also write API keys to .env format for the Python backend
     writeEnvFile(settings);
   });
 
   ipcMain.handle("restart-backend", async () => {
-    stopBackend();
-    await new Promise((r) => setTimeout(r, 2000));
+    if (externalBackend) {
+      await dialog.showMessageBox(mainWindow!, {
+        type: "info", message: "Restart the external engine",
+        detail: "The engine was started by dev.sh. Restart dev.sh to reload saved API settings.",
+      });
+      return false;
+    }
+    await stopBackend();
     startBackend();
     return waitForBackend();
   });
@@ -536,7 +547,7 @@ function writeEnvFile(settings: Record<string, unknown>): void {
     `SOUNDSTRIPE_API_KEY=${envValue(settings.soundstripeApiKey)}`,
     "",
     "# ── Model Configuration ───────────────────────────────",
-    `GEMINI_MODEL=${envValue(settings.geminiModel, "gemini-2.5-flash-preview-05-20")}`,
+    `GEMINI_MODEL=${envValue(settings.geminiModel, "gemini-3.8-flash")}`,
     `VLM_MODEL=${envValue(settings.vlmModel, "nvidia/nemotron-nano-12b-v2-vl")}`,
     `VLM_BASE_URL=${envValue(settings.vlmBaseUrl, "https://integrate.api.nvidia.com")}`,
     "",
@@ -550,7 +561,7 @@ function writeEnvFile(settings: Record<string, unknown>): void {
     `API_PORT=${BACKEND_PORT}`,
   ];
 
-  fs.writeFileSync(envPath, lines.join("\n") + "\n");
+  fs.writeFileSync(envPath, lines.join("\n") + "\n", { mode: 0o600 });
 }
 
 // ─── App Lifecycle ──────────────────────────────────────────────────────────────
@@ -575,6 +586,12 @@ function ensureEnvFromSettings(): void {
 }
 
 app.whenReady().then(async () => {
+  session.defaultSession.webRequest.onBeforeSendHeaders({
+    urls: [`${BACKEND_URL}/*`, `ws://127.0.0.1:${BACKEND_PORT}/*`],
+  }, (details, callback) => {
+    callback({ requestHeaders: { ...details.requestHeaders, ...backendHeaders } });
+  });
+  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   setupIPC();
   createMenu();
   createWindow();
@@ -583,7 +600,7 @@ app.whenReady().then(async () => {
   ensureEnvFromSettings();
 
   // Start backend sidecar (skip if already running, e.g. from dev.sh)
-  const alreadyRunning = await isBackendAlreadyRunning();
+  const alreadyRunning = externalBackend && await isBackendAlreadyRunning();
   if (alreadyRunning) {
     console.log("[Kinetograph] Backend already running — skipping sidecar spawn");
   } else {
@@ -609,7 +626,6 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  stopBackend();
   if (process.platform !== "darwin") {
     app.quit();
   }

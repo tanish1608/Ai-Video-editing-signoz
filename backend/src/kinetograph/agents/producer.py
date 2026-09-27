@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ── Human Review Node ────────────────────────────────────────────────────────
 
+
 async def human_review_node(state: GraphState) -> dict:
     """LangGraph node — Human-in-the-loop approval gate.
 
@@ -42,12 +43,14 @@ async def human_review_node(state: GraphState) -> dict:
     if not paper_edit:
         return {
             "phase": Phase.ERROR.value,
-            "errors": [{
-                "agent": "human_review",
-                "message": "No Paper Edit to review",
-                "phase": "awaiting_approval",
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "human_review",
+                    "message": "No Paper Edit to review",
+                    "phase": "awaiting_approval",
+                    "recoverable": False,
+                }
+            ],
         }
 
     logger.info(
@@ -62,11 +65,13 @@ async def human_review_node(state: GraphState) -> dict:
         json.dump(paper_edit, f, indent=2)
 
     # ── INTERRUPT — pipeline halts here until resumed via /api/pipeline/approve ──
-    decision = interrupt({
-        "type": "paper_edit_review",
-        "message": "Paper Edit ready for your review",
-        "paper_edit": paper_edit,
-    })
+    decision = interrupt(
+        {
+            "type": "paper_edit_review",
+            "message": "Paper Edit ready for your review",
+            "paper_edit": paper_edit,
+        }
+    )
 
     # ── Process the human's decision ─────────────────────────────────────
 
@@ -79,12 +84,14 @@ async def human_review_node(state: GraphState) -> dict:
             return {
                 "phase": Phase.SCRIPTED.value,
                 "edit_instruction": reason,
-                "errors": [{
-                    "agent": "human_review",
-                    "message": reason,
-                    "phase": "awaiting_approval",
-                    "recoverable": True,
-                }],
+                "errors": [
+                    {
+                        "agent": "human_review",
+                        "message": reason,
+                        "phase": "awaiting_approval",
+                        "recoverable": True,
+                    }
+                ],
             }
 
         # Approve (possibly with user-edited paper_edit from the timeline)
@@ -105,7 +112,10 @@ async def human_review_node(state: GraphState) -> dict:
 
     # Simple string approval
     if isinstance(decision, str) and decision.lower() in (
-        "approve", "yes", "ok", "go",
+        "approve",
+        "yes",
+        "ok",
+        "go",
     ):
         logger.info("Human Review: APPROVED (simple)")
         approved_path = settings.state_dir / "approved_edit.json"

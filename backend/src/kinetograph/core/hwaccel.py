@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,12 @@ _ENCODER_PROBES: list[dict] = [
     {
         "name": "h264_videotoolbox",
         "os": "darwin",
-        "encode_flags": ["-q:v", "65"],           # VT quality (0-100, 65 ≈ CRF 18)
+        "encode_flags": ["-q:v", "65"],  # VT quality (0-100, 65 ≈ CRF 18)
         "decode_flags": ["-hwaccel", "videotoolbox"],
     },
     {
         "name": "h264_nvenc",
-        "os": None,                                 # any OS with NVIDIA GPU
+        "os": None,  # any OS with NVIDIA GPU
         "encode_flags": ["-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0"],
         "decode_flags": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
     },
@@ -85,12 +85,15 @@ class HWAccelProfile:
 
 # ─── Detection ──────────────────────────────────────────────────────────────────
 
+
 def _detect_available_encoders() -> set[str]:
     """Query FFmpeg for available H.264 encoders."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         encoders: set[str] = set()
         for line in result.stdout.splitlines():
@@ -112,12 +115,26 @@ def _test_encoder(encoder_name: str) -> bool:
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.04",
-                "-c:v", encoder_name, "-frames:v", "1",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=64x64:d=0.04",
+                "-c:v",
+                encoder_name,
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return result.returncode == 0
     except Exception:

@@ -52,8 +52,6 @@ cleanup() {
         wait "$BACKEND_PID" 2>/dev/null || true
     fi
 
-    # Kill anything still on port 8080
-    lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
 
     ok "All processes stopped."
 }
@@ -110,20 +108,13 @@ preflight() {
 start_backend() {
     info "Starting Python backend on port 8080..."
 
-    # Kill any existing process on 8080
-    lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
-    sleep 0.5
-
+    if lsof -ti:8080 >/dev/null 2>&1; then
+        fail "Port 8080 is in use. Stop the existing engine or use ./dev.sh desktop."
+    fi
     (
         cd "$ROOT_DIR"
-        "$VENV_PYTHON" -m uvicorn kinetograph.server:app \
-            --host 127.0.0.1 \
-            --port 8080 \
-            --reload \
-            --reload-dir "$BACKEND_DIR/src" \
-            2>&1 | while IFS= read -r line; do
-                echo -e "${MAGENTA}[backend]${NC} $line"
-            done
+        exec "$VENV_PYTHON" -m uvicorn kinetograph.server:app \
+            --host 127.0.0.1 --port 8080 --reload --reload-dir "$BACKEND_DIR/src"
     ) &
     BACKEND_PID=$!
 
@@ -146,9 +137,8 @@ start_desktop() {
 
     (
         cd "$DESKTOP_DIR"
-        KINETOGRAPH_EXTERNAL_BACKEND=1 node ./node_modules/.bin/vite 2>&1 | while IFS= read -r line; do
-            echo -e "${CYAN}[desktop]${NC} $line"
-        done
+        export KINETOGRAPH_EXTERNAL_BACKEND=1
+        exec node ./node_modules/.bin/vite
     ) &
     DESKTOP_PID=$!
 

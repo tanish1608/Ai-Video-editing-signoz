@@ -30,6 +30,8 @@ from kinetograph.core.media import probe_media_async
 from kinetograph.core.music import (
     build_video_description,
     fetch_background_music,
+)
+from kinetograph.core.music import (
     is_configured as soundstripe_configured,
 )
 from kinetograph.state import GraphState, Phase
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Step 1: Single-Pass Noise Removal + LUFS Normalization ───────────────────
+
 
 async def _denoise_and_normalize(
     input_path: str,
@@ -57,36 +60,47 @@ async def _denoise_and_normalize(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    audio_filter = ",".join([
-        # 1. Bandpass — kill sub-bass rumble and high-freq hiss
-        "highpass=f=120:poles=2",
-        "lowpass=f=9500",
-        # 2. Adaptive FFT denoiser — removes steady-state hiss / hum
-        "afftdn=nf=-20:tn=1:om=o",
-        # 3. EQ cut at room-resonance frequencies (200–600 Hz)
-        "equalizer=f=350:t=q:w=1.2:g=-4",
-        # 4. Non-local-means denoiser — cleans residual echo smear
-        "anlmdn=s=10:p=0.002:r=0.002:m=20",
-        # 5. Noise gate — silence reverb tails between phrases
-        "agate=threshold=0.03:ratio=4:attack=0.3:release=60:range=0.02",
-        # 6. Speech normalizer — evens out sentence-level loudness
-        "speechnorm=e=6:c=6:t=0.03:r=0.002:f=0.002",
-        # 7. Compressor — tame remaining peaks
-        "acompressor=threshold=0.089:ratio=4:attack=5:release=100:makeup=1",
-        # 8. LUFS normalization (single-pass — avoids a second encode)
-        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-    ])
+    audio_filter = ",".join(
+        [
+            # 1. Bandpass — kill sub-bass rumble and high-freq hiss
+            "highpass=f=120:poles=2",
+            "lowpass=f=9500",
+            # 2. Adaptive FFT denoiser — removes steady-state hiss / hum
+            "afftdn=nf=-20:tn=1:om=o",
+            # 3. EQ cut at room-resonance frequencies (200–600 Hz)
+            "equalizer=f=350:t=q:w=1.2:g=-4",
+            # 4. Non-local-means denoiser — cleans residual echo smear
+            "anlmdn=s=10:p=0.002:r=0.002:m=20",
+            # 5. Noise gate — silence reverb tails between phrases
+            "agate=threshold=0.03:ratio=4:attack=0.3:release=60:range=0.02",
+            # 6. Speech normalizer — evens out sentence-level loudness
+            "speechnorm=e=6:c=6:t=0.03:r=0.002:f=0.002",
+            # 7. Compressor — tame remaining peaks
+            "acompressor=threshold=0.089:ratio=4:attack=5:release=100:makeup=1",
+            # 8. LUFS normalization (single-pass — avoids a second encode)
+            f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        ]
+    )
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-af", audio_filter,
-        "-map", "0:v",
-        "-map", "0:a",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "48000",
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-af",
+        audio_filter,
+        "-map",
+        "0:v",
+        "-map",
+        "0:a",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
         str(out),
     ]
 
@@ -99,6 +113,7 @@ async def _denoise_and_normalize(
 
 
 # ─── Step 3: Speech Window Detection ──────────────────────────────────────────
+
 
 def _detect_speech_windows(
     approved_edit: dict,
@@ -146,6 +161,7 @@ def _detect_speech_windows(
 
 # ─── Step 4: Music Mixing with Ducking ────────────────────────────────────────
 
+
 def _build_ducking_volume_expr(
     speech_windows: list[tuple[float, float]],
     normal_vol: float = 0.9,
@@ -174,7 +190,9 @@ def _build_ducking_volume_expr(
 
     # When speech active → ducked_vol, else → normal_vol
     # FFmpeg volume filter: volume='if(expr, ducked, normal)'
-    vol_expr = f"volume='{ducked_vol}+({normal_vol}-{ducked_vol})*(1-min(1,{speech_expr}))':eval=frame"
+    vol_expr = (
+        f"volume='{ducked_vol}+({normal_vol}-{ducked_vol})*(1-min(1,{speech_expr}))':eval=frame"
+    )
     return vol_expr
 
 
@@ -226,25 +244,37 @@ async def _mix_music(
         )
 
     cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-i", music_path,
-        "-filter_complex", filter_complex,
-        "-map", "0:v",
-        "-map", "[out]",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-i",
+        music_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "0:v",
+        "-map",
+        "[out]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
         str(out),
     ]
 
-    logger.info(f"🔊 Sound Engineer: Mixing background music (vol={music_volume}, "
-                f"ducked={music_ducked_volume}, speech_windows={len(speech_windows)})...")
+    logger.info(
+        f"🔊 Sound Engineer: Mixing background music (vol={music_volume}, "
+        f"ducked={music_ducked_volume}, speech_windows={len(speech_windows)})..."
+    )
     await run_ffmpeg_async(cmd, timeout=600, description="Music mix")
     return out
 
 
 # ─── Intermediate file cleanup ─────────────────────────────────────────────────
+
 
 def _cleanup_intermediates(work_dir: Path, keep: set[str] | None = None) -> None:
     """
@@ -277,6 +307,7 @@ def _cleanup_intermediates(work_dir: Path, keep: set[str] | None = None) -> None
 
 # ─── Agent Entry Point ────────────────────────────────────────────────────────
 
+
 async def sound_engineer_node(state: GraphState) -> dict:
     """
     LangGraph node — The Sound Engineer.
@@ -300,18 +331,20 @@ async def sound_engineer_node(state: GraphState) -> dict:
     if not render_path or not Path(render_path).exists():
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "sound_engineer",
-                "message": f"Rendered video not found: {render_path}",
-                "phase": Phase.MASTERING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "sound_engineer",
+                    "message": f"Rendered video not found: {render_path}",
+                    "phase": Phase.MASTERING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     try:
         render_p = Path(render_path)
         # Sanitize stem: colons are interpreted as protocol separators by FFmpeg
-        safe_stem = re.sub(r'[^\w\s\-.]', '_', render_p.stem)
+        safe_stem = re.sub(r"[^\w\s\-.]", "_", render_p.stem)
         work_dir = settings.state_dir / "sound_engineer"
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -331,7 +364,10 @@ async def sound_engineer_node(state: GraphState) -> dict:
             except Exception as exc:
                 logger.warning(f"🔊 Sound Engineer: Denoise+LUFS failed ({exc}), continuing...")
         else:
-            logger.warning("🔊 Sound Engineer: Input video has NO audio stream — skipping denoise & normalization")
+            logger.warning(
+                "🔊 Sound Engineer: Input video has NO audio stream — skipping "
+                "denoise & normalization"
+            )
 
         # ── Step 3: Fetch Background Music ─────────────────────
         music_path: str | None = None
@@ -339,7 +375,9 @@ async def sound_engineer_node(state: GraphState) -> dict:
         # Re-use existing music file if available (not cleared by edit agent)
         if existing_music and Path(existing_music).exists():
             music_path = existing_music
-            logger.info(f"🔊 Sound Engineer: ♻️ Re-using existing music → {Path(existing_music).name}")
+            logger.info(
+                f"🔊 Sound Engineer: ♻️ Re-using existing music → {Path(existing_music).name}"
+            )
         elif soundstripe_configured():
             try:
                 video_desc = build_video_description(approved_edit, master_index)
@@ -362,9 +400,13 @@ async def sound_engineer_node(state: GraphState) -> dict:
                 )
                 if music_file:
                     music_path = str(music_file)
-                    logger.info(f"🔊 Sound Engineer: ✓ Background music fetched → {music_file.name}")
+                    logger.info(
+                        f"🔊 Sound Engineer: ✓ Background music fetched → {music_file.name}"
+                    )
             except Exception as exc:
-                logger.warning(f"🔊 Sound Engineer: Music fetch failed ({exc}), continuing without music...")
+                logger.warning(
+                    f"🔊 Sound Engineer: Music fetch failed ({exc}), continuing without music..."
+                )
         else:
             logger.info("🔊 Sound Engineer: Soundstripe not configured — skipping background music")
 
@@ -378,27 +420,32 @@ async def sound_engineer_node(state: GraphState) -> dict:
                     music_path=music_path,
                     output_path=mixed_path,
                     speech_windows=speech_windows,
-                    music_volume=0.35,        # 35% volume normally
+                    music_volume=0.35,  # 35% volume normally
                     music_ducked_volume=0.15,  # 15% during speech
                 )
                 current_path = mixed_path
                 logger.info("🔊 Sound Engineer: ✓ Music mixed with speech ducking")
             except Exception as exc:
-                logger.warning(f"🔊 Sound Engineer: Music mixing failed ({exc}), continuing without music...")
+                logger.warning(
+                    f"🔊 Sound Engineer: Music mixing failed ({exc}), continuing without music..."
+                )
 
         # ── Step 5: Final Master ───────────────────────────────
         # Strip existing _mastered suffix to prevent _mastered_mastered
         stem = safe_stem
         if stem.endswith("_mastered"):
-            stem = stem[:-len("_mastered")]
+            stem = stem[: -len("_mastered")]
         mastered_path = render_p.parent / f"{stem}_mastered{render_p.suffix}"
 
         if current_path != str(mastered_path):
             # Copy/remux to final output location (async)
             cmd = [
-                "ffmpeg", "-y",
-                "-i", current_path,
-                "-c", "copy",
+                "ffmpeg",
+                "-y",
+                "-i",
+                current_path,
+                "-c",
+                "copy",
                 str(mastered_path),
             ]
             try:
@@ -406,10 +453,20 @@ async def sound_engineer_node(state: GraphState) -> dict:
             except RuntimeError:
                 # If stream copy fails, re-encode (async)
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-i", current_path,
-                    "-c:v", "libx264", "-crf", "18", "-preset", "medium",
-                    "-c:a", "aac", "-b:a", "192k",
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    current_path,
+                    "-c:v",
+                    "libx264",
+                    "-crf",
+                    "18",
+                    "-preset",
+                    "medium",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
                     str(mastered_path),
                 ]
                 await run_ffmpeg_async(cmd, timeout=600, description="Final master (re-encode)")
@@ -436,10 +493,12 @@ async def sound_engineer_node(state: GraphState) -> dict:
         logger.error(f"🔊 Sound Engineer: Mastering failed: {exc}")
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "sound_engineer",
-                "message": f"Audio mastering failed: {exc}",
-                "phase": Phase.MASTERING,
-                "recoverable": True,
-            }],
+            "errors": [
+                {
+                    "agent": "sound_engineer",
+                    "message": f"Audio mastering failed: {exc}",
+                    "phase": Phase.MASTERING,
+                    "recoverable": True,
+                }
+            ],
         }

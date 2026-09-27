@@ -26,19 +26,19 @@ import { getBackendUrlSync } from "./backend";
 
 // ─── Shared document ──────────────────────────────────────────────────────────
 
-export const ydoc = new Y.Doc();
+export let ydoc = new Y.Doc();
 
 /** Ordered timeline clips — each element is a Y.Map with PaperEditClip fields. */
-export const yClips = ydoc.getArray<Y.Map<unknown>>("clips");
+export let yClips = ydoc.getArray<Y.Map<unknown>>("clips");
 
 /** Sequence metadata: title, music_prompt, music_path. */
-export const yMeta = ydoc.getMap<unknown>("meta");
+export let yMeta = ydoc.getMap<unknown>("meta");
 
 /** V2/V3… video overlay clips (PiP), each a Y.Map with a `trackId`. */
-export const yOverlays = ydoc.getArray<Y.Map<unknown>>("overlays");
+export let yOverlays = ydoc.getArray<Y.Map<unknown>>("overlays");
 
 /** A2/A3… audio clips, each a Y.Map with a `trackId`. */
-export const yAudio = ydoc.getArray<Y.Map<unknown>>("audio");
+export let yAudio = ydoc.getArray<Y.Map<unknown>>("audio");
 
 // ─── Undo / Redo ──────────────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ export const yAudio = ydoc.getArray<Y.Map<unknown>>("audio");
  * (different client-id) and are excluded automatically. Use origin = 'user'
  * for local edits.
  */
-export const undoManager = new Y.UndoManager([yClips, yMeta, yOverlays, yAudio], {
+export let undoManager = new Y.UndoManager([yClips, yMeta, yOverlays, yAudio], {
 	trackedOrigins: new Set(["user"]),
 	captureTimeout: 500, // group changes within 500 ms
 });
@@ -77,7 +77,11 @@ export function connectProvider(): WebsocketProvider {
 		},
 	);
 
-	return _provider;
+	const provider = _provider;
+	provider.on("connection-close", (event: CloseEvent | null) => {
+		if (event?.code === 4001) provider.disconnect();
+	});
+	return provider;
 }
 
 /** Disconnect and destroy the provider (e.g. on unmount / page leave). */
@@ -96,20 +100,33 @@ export function disconnectProvider(): void {
  * into the new project.  After clearing, ``connectProvider()`` will
  * pull the correct state from the backend via sync-step-2.
  */
+const documentListeners = new Set<() => void>();
+
+function notifyDocumentListeners(): void {
+	for (const listener of documentListeners) listener();
+}
+ydoc.on("afterTransaction", notifyDocumentListeners);
+
+export function observeDocument(listener: () => void): () => void {
+	documentListeners.add(listener);
+	return () => documentListeners.delete(listener);
+}
+
 export function resetDoc(): void {
-	ydoc.transact(() => {
-		if (yClips.length > 0) yClips.delete(0, yClips.length);
-		if (yOverlays.length > 0) yOverlays.delete(0, yOverlays.length);
-		if (yAudio.length > 0) yAudio.delete(0, yAudio.length);
-		const keys = Array.from(yMeta.keys());
-		for (const key of keys) {
-			yMeta.delete(key);
-		}
-	}, "reset");
-	// Drop the undo history — otherwise ⌘Z after a project switch would try to
-	// undo StackItems that reference the *previous* project's clips, mutating
-	// ghost clips into the freshly-loaded doc.
-	undoManager.clear();
+	disconnectProvider();
+	undoManager.destroy();
+	ydoc.destroy();
+	ydoc = new Y.Doc();
+	yClips = ydoc.getArray<Y.Map<unknown>>("clips");
+	yMeta = ydoc.getMap<unknown>("meta");
+	yOverlays = ydoc.getArray<Y.Map<unknown>>("overlays");
+	yAudio = ydoc.getArray<Y.Map<unknown>>("audio");
+	undoManager = new Y.UndoManager([yClips, yMeta, yOverlays, yAudio], {
+		trackedOrigins: new Set(["user"]),
+		captureTimeout: 500,
+	});
+	ydoc.on("afterTransaction", notifyDocumentListeners);
+	notifyDocumentListeners();
 }
 
 /** Whether the initial CRDT sync with the backend has completed. */

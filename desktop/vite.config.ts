@@ -6,7 +6,15 @@ import electronRenderer from "vite-plugin-electron-renderer";
 import path from "node:path";
 
 export default defineConfig({
+  base: "./",
   plugins: [
+    {
+      name: "development-csp",
+      apply: "serve",
+      transformIndexHtml(html) {
+        return html.replace("script-src 'self';", "script-src 'self' 'unsafe-inline';");
+      },
+    },
     react(),
     tailwindcss(),
     electron([
@@ -16,7 +24,7 @@ export default defineConfig({
           build: {
             outDir: "dist-electron",
             rollupOptions: {
-              external: ["electron", "electron-store"],
+              external: ["electron"],
             },
           },
         },

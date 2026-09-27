@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Pexels Search ────────────────────────────────────────────────────────────
 
+
 async def _search_pexels(query: str, orientation: str | None = None) -> list[dict]:
     """
     Search Pexels for stock video clips.
@@ -62,15 +63,17 @@ async def _search_pexels(query: str, orientation: str | None = None) -> list[dic
                     best_file = vf
 
         if best_file:
-            results.append({
-                "id": video["id"],
-                "url": video.get("url", ""),
-                "download_url": best_file["link"],
-                "width": best_file.get("width", 0),
-                "height": best_file.get("height", 0),
-                "duration": video.get("duration", 0),
-                "photographer": video.get("user", {}).get("name", "Unknown"),
-            })
+            results.append(
+                {
+                    "id": video["id"],
+                    "url": video.get("url", ""),
+                    "download_url": best_file["link"],
+                    "width": best_file.get("width", 0),
+                    "height": best_file.get("height", 0),
+                    "duration": video.get("duration", 0),
+                    "photographer": video.get("user", {}).get("name", "Unknown"),
+                }
+            )
 
     return results
 
@@ -111,7 +114,7 @@ async def _fetch_one_clip(clip: dict, sem: asyncio.Semaphore) -> dict | None:
         await _download_clip(best["download_url"], output_path)
 
         try:
-            meta = probe_media(output_path)
+            meta = await asyncio.to_thread(probe_media, output_path)
             logger.info(
                 f"🎨 Synthesizer: Downloaded {clip_id} — "
                 f"{meta['width']}x{meta['height']}, {meta['duration_ms']}ms"
@@ -143,12 +146,14 @@ async def synthesizer_node(state: GraphState) -> dict:
     if not approved_edit:
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "synthesizer",
-                "message": "No approved edit found",
-                "phase": Phase.SYNTHESIZING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "synthesizer",
+                    "message": "No approved edit found",
+                    "phase": Phase.SYNTHESIZING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     clips = approved_edit.get("clips", [])
@@ -172,19 +177,23 @@ async def synthesizer_node(state: GraphState) -> dict:
     for clip, result in zip(synth_clips, results):
         if isinstance(result, Exception):
             logger.error(f"🎨 Synthesizer: Failed for {clip['clip_id']}: {result}")
-            errors.append({
-                "agent": "synthesizer",
-                "message": f"Pexels search failed for {clip['clip_id']}: {result}",
-                "phase": Phase.SYNTHESIZING,
-                "recoverable": True,
-            })
+            errors.append(
+                {
+                    "agent": "synthesizer",
+                    "message": f"Pexels search failed for {clip['clip_id']}: {result}",
+                    "phase": Phase.SYNTHESIZING,
+                    "recoverable": True,
+                }
+            )
         elif result is None:
-            errors.append({
-                "agent": "synthesizer",
-                "message": f"No Pexels results for clip {clip['clip_id']}",
-                "phase": Phase.SYNTHESIZING,
-                "recoverable": True,
-            })
+            errors.append(
+                {
+                    "agent": "synthesizer",
+                    "message": f"No Pexels results for clip {clip['clip_id']}",
+                    "phase": Phase.SYNTHESIZING,
+                    "recoverable": True,
+                }
+            )
         else:
             synth_assets.append(result)
 

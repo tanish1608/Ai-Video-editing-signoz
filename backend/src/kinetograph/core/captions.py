@@ -29,17 +29,17 @@ logger = logging.getLogger(__name__)
 
 # Colours in ASS format: &HAABBGGRR& (AA=alpha, BB=blue, GG=green, RR=red)
 # 00 alpha = fully opaque, FF = fully transparent
-_WHITE = "&H00FFFFFF"       # white
-_YELLOW = "&H0000FFFF"     # yellow (highlight colour)
-_OUTLINE = "&H00000000"    # black outline
-_BOX_BG = "&HC0000000"     # semi-transparent black background (C0 = 75% opaque)
+_WHITE = "&H00FFFFFF"  # white
+_YELLOW = "&H0000FFFF"  # yellow (highlight colour)
+_OUTLINE = "&H00000000"  # black outline
+_BOX_BG = "&HC0000000"  # semi-transparent black background (C0 = 75% opaque)
 
 _FONT_NAME = "Arial"
-_FONT_SIZE = 56             # Tuned for 1080px width vertical video
+_FONT_SIZE = 56  # Tuned for 1080px width vertical video
 _OUTLINE_SIZE = 3
 _SHADOW_SIZE = 0
-_MARGIN_V = 200             # Push up from bottom edge (pixels)
-_MARGIN_H = 50              # Left/right margins
+_MARGIN_V = 200  # Push up from bottom edge (pixels)
+_MARGIN_H = 50  # Left/right margins
 
 # Maximum words per caption group
 _MAX_WORDS_PER_GROUP = 4
@@ -53,17 +53,18 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
     "bold-yellow": {
         "id": "bold-yellow",
         "name": "Bold Yellow",
-        "description": "TikTok-style — yellow highlight on active word, white others, dark pill background",
+        "description": "TikTok-style — yellow highlight on active word, "
+        "white others, dark pill background",
         "preview": "🟡 Bold yellow highlight",
         "font_name": "Arial",
         "font_size": 56,
-        "active_color": "&H0000FFFF",   # yellow
-        "inactive_color": "&H00FFFFFF", # white
+        "active_color": "&H0000FFFF",  # yellow
+        "inactive_color": "&H00FFFFFF",  # white
         "outline_color": "&H00000000",  # black
-        "bg_color": "&HC0000000",       # semi-transparent black
+        "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 3,
-        "position": "bottom",           # bottom | center | top
-        "border_style": 4,              # 4 = opaque box
+        "position": "bottom",  # bottom | center | top
+        "border_style": 4,  # 4 = opaque box
     },
     "clean-white": {
         "id": "clean-white",
@@ -72,13 +73,13 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "preview": "⬜ Clean white minimal",
         "font_name": "Arial",
         "font_size": 52,
-        "active_color": "&H00FFFFFF",   # white (bold)
-        "inactive_color": "&H80FFFFFF", # semi-transparent white
+        "active_color": "&H00FFFFFF",  # white (bold)
+        "inactive_color": "&H80FFFFFF",  # semi-transparent white
         "outline_color": "&H00000000",  # black
-        "bg_color": "&H00000000",       # transparent (no box)
+        "bg_color": "&H00000000",  # transparent (no box)
         "outline_size": 4,
         "position": "bottom",
-        "border_style": 1,              # 1 = outline + drop shadow
+        "border_style": 1,  # 1 = outline + drop shadow
     },
     "neon-green": {
         "id": "neon-green",
@@ -87,10 +88,10 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "preview": "🟢 Neon green highlight",
         "font_name": "Arial",
         "font_size": 58,
-        "active_color": "&H0000FF00",   # green
-        "inactive_color": "&H00FFFFFF", # white
+        "active_color": "&H0000FF00",  # green
+        "inactive_color": "&H00FFFFFF",  # white
         "outline_color": "&H00000000",  # black
-        "bg_color": "&HC0000000",       # semi-transparent black
+        "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 3,
         "position": "bottom",
         "border_style": 4,
@@ -102,10 +103,10 @@ CAPTION_STYLE_PRESETS: dict[str, dict] = {
         "preview": "📺 Classic TV subtitles",
         "font_name": "Arial",
         "font_size": 48,
-        "active_color": "&H00FFFFFF",   # white (same as inactive — no highlight)
-        "inactive_color": "&H00FFFFFF", # white
+        "active_color": "&H00FFFFFF",  # white (same as inactive — no highlight)
+        "inactive_color": "&H00FFFFFF",  # white
         "outline_color": "&H00000000",  # black
-        "bg_color": "&HC0000000",       # semi-transparent black
+        "bg_color": "&HC0000000",  # semi-transparent black
         "outline_size": 2,
         "position": "bottom",
         "border_style": 4,
@@ -153,6 +154,7 @@ def _resolve_font(bold: bool = True) -> str:
 
 # ─── ASS File Builder ─────────────────────────────────────────────────────────
 
+
 def _ass_header(width: int, height: int, style: dict | None = None) -> str:
     """Generate the ASS file header with script info and styles."""
     s = style or {}
@@ -168,6 +170,18 @@ def _ass_header(width: int, height: int, style: dict | None = None) -> str:
     margin_v = {"top": 60, "center": 0, "bottom": _MARGIN_V}.get(position, _MARGIN_V)
     alignment = {"top": 8, "center": 5, "bottom": 2}.get(position, 2)  # ASS numpad alignment
 
+    style_line = (
+        f"Style: Default,{font_name},{font_size},{inactive_color},"
+        f"{active_color},{outline_color},{bg_color},-1,0,0,0,100,100,1,0,"
+        f"{border_style},{outline_size},{_SHADOW_SIZE},{alignment},{_MARGIN_H},"
+        f"{_MARGIN_H},{margin_v}"
+    )
+    style_format = (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour,"
+        " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
+        " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
+        " Alignment, MarginL, MarginR, MarginV"
+    )
     return dedent(f"""\
         [Script Info]
         Title: Kinetograph Captions
@@ -179,8 +193,8 @@ def _ass_header(width: int, height: int, style: dict | None = None) -> str:
         PlayResY: {height}
 
         [V4+ Styles]
-        Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV
-        Style: Default,{font_name},{font_size},{inactive_color},{active_color},{outline_color},{bg_color},-1,0,0,0,100,100,1,0,{border_style},{outline_size},{_SHADOW_SIZE},{alignment},{_MARGIN_H},{_MARGIN_H},{margin_v}
+        {style_format}
+        {style_line}
 
         [Events]
         Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -208,15 +222,11 @@ def _clean_word(text: str) -> str:
     token containing them can't corrupt the styling override block or start an
     unintended override.
     """
-    return (
-        text.strip()
-        .replace("\\", "\\\\")
-        .replace("{", "\\{")
-        .replace("}", "\\}")
-    )
+    return text.strip().replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
 # ─── Word Grouping ────────────────────────────────────────────────────────────
+
 
 def _group_words(words: list[dict], max_per_group: int = _MAX_WORDS_PER_GROUP) -> list[list[dict]]:
     """
@@ -239,7 +249,7 @@ def _group_words(words: list[dict], max_per_group: int = _MAX_WORDS_PER_GROUP) -
         current_group.append(word)
 
         # Split on sentence boundaries or when group is full
-        is_sentence_end = bool(re.search(r'[.!?]$', text))
+        is_sentence_end = bool(re.search(r"[.!?]$", text))
         is_full = len(current_group) >= max_per_group
 
         if is_sentence_end or is_full:
@@ -254,6 +264,7 @@ def _group_words(words: list[dict], max_per_group: int = _MAX_WORDS_PER_GROUP) -
 
 
 # ─── ASS Dialogue Events ──────────────────────────────────────────────────────
+
 
 def _build_events(word_groups: list[list[dict]], style: dict | None = None) -> list[str]:
     """
@@ -323,6 +334,7 @@ def _build_events(word_groups: list[list[dict]], style: dict | None = None) -> l
 
 # ─── Timeline Mapping ─────────────────────────────────────────────────────────
 
+
 def map_words_to_timeline(
     approved_edit: dict,
     master_index: list[dict],
@@ -387,11 +399,13 @@ def map_words_to_timeline(
 
             # Check if word falls within the clip's range (with some tolerance)
             if w_start >= in_ms - 50 and w_end <= out_ms + 50:
-                remapped_words.append({
-                    "text": w_text,
-                    "start_ms": cumulative_offset_ms + max(0, w_start - in_ms),
-                    "end_ms": cumulative_offset_ms + max(0, w_end - in_ms),
-                })
+                remapped_words.append(
+                    {
+                        "text": w_text,
+                        "start_ms": cumulative_offset_ms + max(0, w_start - in_ms),
+                        "end_ms": cumulative_offset_ms + max(0, w_end - in_ms),
+                    }
+                )
 
         cumulative_offset_ms += clip_duration_ms
 
@@ -399,6 +413,7 @@ def map_words_to_timeline(
 
 
 # ─── Public API ────────────────────────────────────────────────────────────────
+
 
 def generate_ass_captions(
     approved_edit: dict,
@@ -496,19 +511,28 @@ def burn_captions(
     # FFmpeg ass filter needs special chars escaped inside the filtergraph
     escaped = escape_ffmpeg_filter_path(ass_path_str)
     cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vf", f"ass={escaped}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-c:a", "copy",
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-vf",
+        f"ass={escaped}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
         str(output_path),
     ]
     logger.info("📝 Captions: Burning via FFmpeg ass filter...")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Caption burn failed — FFmpeg ass filter error: {result.stderr[:500]}"
-        )
+        raise RuntimeError(f"Caption burn failed — FFmpeg ass filter error: {result.stderr[:500]}")
     logger.info(f"📝 Captions: Burned → {output_path}")
     return output_path
 
@@ -518,7 +542,9 @@ def _ffmpeg_has_filter(name: str) -> bool:
     try:
         result = subprocess.run(
             ["ffmpeg", "-filters"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return f" {name} " in result.stdout or f" {name}\n" in result.stdout
     except Exception:

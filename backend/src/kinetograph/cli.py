@@ -77,16 +77,18 @@ def _load_state_from_disk() -> dict | None:
                 atype = "b-roll"
             else:
                 atype = "a-roll"
-            raw_assets.append({
-                "file_path": fpath,
-                "file_name": p.name,
-                "asset_type": atype,
-                "duration_ms": 0,
-                "width": 0,
-                "height": 0,
-                "fps": 0.0,
-                "has_audio": True,
-            })
+            raw_assets.append(
+                {
+                    "file_path": fpath,
+                    "file_name": p.name,
+                    "asset_type": atype,
+                    "duration_ms": 0,
+                    "width": 0,
+                    "height": 0,
+                    "fps": 0.0,
+                    "has_audio": True,
+                }
+            )
 
     # Also load paper_edit if it exists
     paper_edit = None
@@ -105,7 +107,9 @@ def _load_state_from_disk() -> dict | None:
     console.print(f"  [green]✓[/green] Loaded master index: {len(master_index)} entries")
     console.print(f"  [green]✓[/green] Found {len(raw_assets)} source file(s)")
     if paper_edit:
-        console.print(f"  [green]✓[/green] Loaded existing Paper Edit: {paper_edit.get('title', '?')}")
+        console.print(
+            f"  [green]✓[/green] Loaded existing Paper Edit: {paper_edit.get('title', '?')}"
+        )
     if approved_edit:
         console.print(f"  [green]✓[/green] Loaded approved edit: {approved_edit.get('title', '?')}")
 
@@ -124,7 +128,9 @@ def _load_state_from_disk() -> dict | None:
         if title:
             safe_title = title.replace(" ", "_")
             # Look for the base render (not mastered, not captioned)
-            for candidate in sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True):
+            for candidate in sorted(
+                output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True
+            ):
                 name = candidate.stem
                 if "mastered" in name or "captioned" in name:
                     continue
@@ -134,11 +140,15 @@ def _load_state_from_disk() -> dict | None:
                     break
         # Fallback: most recent non-mastered, non-captioned mp4
         if "render_path" not in state:
-            for candidate in sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True):
+            for candidate in sorted(
+                output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True
+            ):
                 name = candidate.stem
                 if "mastered" not in name and "captioned" not in name:
                     state["render_path"] = str(candidate)
-                    console.print(f"  [green]✓[/green] Found rendered video (fallback): {candidate.name}")
+                    console.print(
+                        f"  [green]✓[/green] Found rendered video (fallback): {candidate.name}"
+                    )
                     break
 
     return state
@@ -153,7 +163,6 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
                      e.g. "scripter" loads the master index and starts at scripter.
     """
     from kinetograph.observability import init_telemetry
-    from kinetograph.orchestrator import compile_graph
 
     init_telemetry()
     graph = compile_graph() if not resume_from else compile_graph(start_from=resume_from)
@@ -175,7 +184,10 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
 
     # ── Resume: load state from disk ──
     if resume_from:
-        console.print(f"\n[bold yellow]⏩ Resuming from {resume_from}[/bold yellow] — loading state from disk...")
+        console.print(
+            f"\n[bold yellow]⏩ Resuming from {resume_from}[/bold yellow] — "
+            f"loading state from disk..."
+        )
         saved = _load_state_from_disk()
         if not saved:
             console.print("[red]Error: No saved state found in state/ directory.[/red]")
@@ -204,13 +216,14 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
         else:
             initial_state["phase"] = Phase.INDEXED
     else:
-        console.print(f"\n[bold green]▶ Starting pipeline[/bold green] — thread: {thread_id[:8]}...")
+        console.print(
+            f"\n[bold green]▶ Starting pipeline[/bold green] — thread: {thread_id[:8]}..."
+        )
 
     console.print(f"[dim]Prompt: {prompt}[/dim]\n")
 
     # Run until interrupt or completion
     try:
-        result = None
         async for event in graph.astream(initial_state, config, stream_mode="updates"):
             for node_name, update in event.items():
                 update = _safe_update(update)
@@ -225,8 +238,6 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
                         console.print(
                             f"  [red]✗[/red] [{err.get('agent', '?')}] {err.get('message', '')}"
                         )
-
-                result = update
 
         # Check if we hit an interrupt (human_review waiting for approval)
         snapshot = graph.get_state(config)
@@ -270,6 +281,7 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
                 input()
                 # Re-read the edited file
                 import json
+
                 edit_path = settings.state_dir / "paper_edit_review.json"
                 with open(edit_path) as f:
                     edited = json.load(f)
@@ -281,6 +293,7 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
             console.print("\n[bold green]▶ Resuming pipeline...[/bold green]\n")
 
             from langgraph.types import Command
+
             async for event in graph.astream(
                 Command(resume=decision), config, stream_mode="updates"
             ):
@@ -296,8 +309,6 @@ async def run_pipeline(prompt: str, project_name: str = "untitled", resume_from:
                             console.print(
                                 f"  [red]✗[/red] [{err.get('agent', '?')}] {err.get('message', '')}"
                             )
-
-                    result = update
 
         # Final status
         final_state = graph.get_state(config)
@@ -337,24 +348,35 @@ def main():
     # `kinetograph run`
     run_parser = sub.add_parser("run", help="Run the video editing pipeline")
     run_parser.add_argument(
-        "--prompt", "-p",
+        "--prompt",
+        "-p",
         type=str,
         help="Creative brief / editing instructions",
     )
     run_parser.add_argument(
-        "--name", "-n",
+        "--name",
+        "-n",
         type=str,
         default="untitled",
         help="Project name",
     )
     run_parser.add_argument("--verbose", "-v", action="store_true")
     run_parser.add_argument(
-        "--resume", "-r",
+        "--resume",
+        "-r",
         type=str,
-        choices=["scripter", "human_review", "synthesizer", "director", "captioner", "sound_engineer", "export"],
+        choices=[
+            "scripter",
+            "human_review",
+            "synthesizer",
+            "director",
+            "captioner",
+            "sound_engineer",
+            "export",
+        ],
         default=None,
         help="Skip to this agent — loads saved state from state/ directory. "
-             "e.g. --resume scripter skips the Archivist and starts from scripting.",
+        "e.g. --resume scripter skips the Archivist and starts from scripting.",
     )
 
     # `kinetograph serve`
@@ -380,10 +402,14 @@ def main():
     elif args.command == "serve":
         _setup_logging(args.verbose)
         _print_banner()
-        console.print(f"\n[bold]Starting web UI on http://{settings.api_host}:{settings.api_port}[/bold]\n")
+        console.print(
+            f"\n[bold]Starting web UI on http://{settings.api_host}:{settings.api_port}[/bold]\n"
+        )
 
         import uvicorn
+
         from kinetograph.server import app
+
         uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
     else:

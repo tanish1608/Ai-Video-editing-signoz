@@ -28,6 +28,7 @@ import {
 	yOverlays,
 	yAudio,
 	undoManager,
+	observeDocument,
 	paperEditFromDoc,
 	loadPaperEditIntoDoc,
 	findClipIndex,
@@ -674,7 +675,7 @@ function _syncYjsToZustand() {
 	const pe = paperEditFromDoc();
 	const updates: Partial<KinetographState> = {
 		paperEdit: pe,
-		musicPath: (yMeta.get("music_path") as string) ?? useKinetographStore.getState().musicPath,
+		musicPath: (yMeta.get("music_path") as string) ?? null,
 		v2Clips: overlaysFromDoc(),
 		a2Clips: audioFromDoc(),
 	};
@@ -686,7 +687,4 @@ function _syncYjsToZustand() {
 	useKinetographStore.setState(updates);
 }
 
-yClips.observeDeep(_syncYjsToZustand);
-yMeta.observe(_syncYjsToZustand);
-yOverlays.observeDeep(_syncYjsToZustand);
-yAudio.observeDeep(_syncYjsToZustand);
+observeDocument(_syncYjsToZustand);
