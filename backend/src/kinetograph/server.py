@@ -8,6 +8,7 @@ to control the pipeline, browse assets, edit timelines, and stream status.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -22,21 +23,17 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from kinetograph import __version__
-from kinetograph.config import settings
 from kinetograph import crdt as crdt_mod
-import hashlib
-import shutil
-import os
-
-from kinetograph.core.media import VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, probe_media
+from kinetograph.config import settings
+from kinetograph.core.media import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, probe_media
+from kinetograph.security import LocalAccessMiddleware
 from kinetograph.state import Phase
 
-
-_checkpoint_connection = None          # aiosqlite.Connection | None
+_checkpoint_connection = None  # aiosqlite.Connection | None
 _checkpoint_project: Path | None = None
 
 
@@ -99,7 +96,7 @@ def _safe_update(update) -> dict:
     """
     if isinstance(update, dict):
         return update
-    if hasattr(update, "items"):          # dict-like
+    if hasattr(update, "items"):  # dict-like
         return dict(update)
     return {}
 
@@ -121,6 +118,7 @@ def _merge_state(target: dict, update) -> None:
                 continue
         target[key] = value
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +132,7 @@ async def lifespan(app: FastAPI):
     """
     # ── Startup ──
     from kinetograph.observability import init_telemetry
+
     init_telemetry()
 
     for d in (
@@ -194,6 +193,7 @@ app.add_middleware(
     expose_headers=["X-Total-Count", "X-Pipeline-Phase"],
 )
 
+app.add_middleware(LocalAccessMiddleware)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  SESSION MANAGEMENT  (multi-tenant — each pipeline run gets its own session)
@@ -203,9 +203,10 @@ app.add_middleware(
 @dataclass
 class PipelineSession:
     """State for a single pipeline run."""
+
     thread_id: str
     pipeline_state: dict
-    graph: object = None         # compiled LangGraph
+    graph: object = None  # compiled LangGraph
     config: dict = field(default_factory=dict)
     graph_start: str = "archivist"
     websockets: list[WebSocket] = field(default_factory=list)
@@ -224,7 +225,7 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, PipelineSession] = {}
-        self._active_id: str | None = None   # the most recent session (default)
+        self._active_id: str | None = None  # the most recent session (default)
         self._global_websockets: list[WebSocket] = []
 
     def create(self, thread_id: str | None = None) -> PipelineSession:
@@ -330,14 +331,21 @@ async def _restore_persisted_session() -> None:
 #  REQUEST / RESPONSE MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class RunRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=10_000, description="Natural language creative brief")
-    project_name: str = Field("untitled", min_length=1, max_length=160, description="Project name for output files")
+    prompt: str = Field(
+        ..., min_length=1, max_length=10_000, description="Natural language creative brief"
+    )
+    project_name: str = Field(
+        "untitled", min_length=1, max_length=160, description="Project name for output files"
+    )
 
 
 class ApprovalRequest(BaseModel):
     action: Literal["approve", "reject"] = Field(..., description="'approve' or 'reject'")
-    paper_edit: Optional[dict] = Field(None, description="Modified Paper Edit (if user made changes)")
+    paper_edit: Optional[dict] = Field(
+        None, description="Modified Paper Edit (if user made changes)"
+    )
     reason: Optional[str] = Field(None, description="Rejection reason (if action='reject')")
 
 
@@ -347,20 +355,40 @@ class ApprovalRequest(BaseModel):
 
 class EditInstructionRequest(BaseModel):
     """Post-pipeline edit request — natural language instruction to modify the video."""
-    instruction: str = Field(..., min_length=1, max_length=10_000, description="Natural language edit instruction (e.g., 'change the music to something upbeat')")
-    edit_type: Optional[Literal["rescript", "resynthesize", "rerender", "audio", "general"]] = Field(
-        None,
-        description="Hint: 'rescript', 'resynthesize', 'rerender', 'audio', or 'general'. Auto-detected if omitted.",
+
+    instruction: str = Field(
+        ...,
+        min_length=1,
+        max_length=10_000,
+        description=(
+            "Natural language edit instruction (e.g., 'change the music to something upbeat')"
+        ),
+    )
+    edit_type: Optional[Literal["rescript", "resynthesize", "rerender", "audio", "general"]] = (
+        Field(
+            None,
+            description=(
+                "Hint: 'rescript', 'resynthesize', 'rerender', 'audio', or "
+                "'general'. Auto-detected if omitted."
+            ),
+        )
     )
 
 
 class CaptionStyleRequest(BaseModel):
     """User's chosen caption style for the Captioner agent."""
-    style_id: str = Field(..., min_length=1, max_length=80, description="Caption style preset ID (e.g. 'bold-yellow', 'clean-white')")
+
+    style_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=80,
+        description="Caption style preset ID (e.g. 'bold-yellow', 'clean-white')",
+    )
 
 
 class ProjectSettings(BaseModel):
     """Configurable project settings exposed to the frontend."""
+
     output_width: Optional[int] = Field(None, ge=64, le=7680)
     output_height: Optional[int] = Field(None, ge=64, le=7680)
     output_orientation: Optional[Literal["portrait", "landscape"]] = None
@@ -371,6 +399,7 @@ class ProjectSettings(BaseModel):
 
 class RenderRequest(BaseModel):
     """Re-render with custom resolution & quality."""
+
     width: int = Field(1080, ge=64, le=7680, description="Output width in pixels")
     height: int = Field(1920, ge=64, le=7680, description="Output height in pixels")
     quality: Literal["high", "medium", "low"] = Field("high", description="Encoding quality")
@@ -378,12 +407,21 @@ class RenderRequest(BaseModel):
 
 class ColorGradeRequest(BaseModel):
     """Color grading parameters — all values are offsets from neutral."""
+
     brightness: float = Field(0.0, ge=-1.0, le=1.0, description="Brightness offset (-1..1)")
-    contrast: float = Field(1.0, ge=0.0, le=3.0, description="Contrast multiplier (0..3, 1=neutral)")
-    saturation: float = Field(1.0, ge=0.0, le=3.0, description="Saturation multiplier (0..3, 1=neutral)")
+    contrast: float = Field(
+        1.0, ge=0.0, le=3.0, description="Contrast multiplier (0..3, 1=neutral)"
+    )
+    saturation: float = Field(
+        1.0, ge=0.0, le=3.0, description="Saturation multiplier (0..3, 1=neutral)"
+    )
     gamma: float = Field(1.0, ge=0.1, le=5.0, description="Gamma (0.1..5, 1=neutral)")
-    temperature: float = Field(0.0, ge=-1.0, le=1.0, description="Warm/cool shift (-1=cool, 0=neutral, 1=warm)")
-    tint: float = Field(0.0, ge=-1.0, le=1.0, description="Green/magenta tint (-1=green, 0=neutral, 1=magenta)")
+    temperature: float = Field(
+        0.0, ge=-1.0, le=1.0, description="Warm/cool shift (-1=cool, 0=neutral, 1=warm)"
+    )
+    tint: float = Field(
+        0.0, ge=-1.0, le=1.0, description="Green/magenta tint (-1=green, 0=neutral, 1=magenta)"
+    )
     shadows: float = Field(0.0, ge=-1.0, le=1.0, description="Shadow lift/crush (-1..1)")
     highlights: float = Field(0.0, ge=-1.0, le=1.0, description="Highlight lift/crush (-1..1)")
 
@@ -392,11 +430,12 @@ class ColorGradeRequest(BaseModel):
 #  WEBSOCKET BROADCAST
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _json_default(obj):
     """Custom JSON default serializer — handles Phase enums safely."""
     if isinstance(obj, Phase):
         return obj.value
-    if hasattr(obj, "value"):       # other enums
+    if hasattr(obj, "value"):  # other enums
         return obj.value
     return str(obj)
 
@@ -421,7 +460,7 @@ _selected_caption_style_id: str = "bold-yellow"
 
 # ─── Timeline Extras (V2 overlays, music — not in CRDT) ──────────────────────
 
-_timeline_extras: dict = {}   # in-memory cache of the latest extras
+_timeline_extras: dict = {}  # in-memory cache of the latest extras
 
 
 def _save_timeline_extras(overlay_clips: list | None = None, music_path: str | None = None) -> None:
@@ -461,7 +500,11 @@ def _ensure_caption_style(session: "PipelineSession") -> None:
     """Auto-set default caption style if none is set yet."""
     if not session.pipeline_state.get("caption_style"):
         from kinetograph.core.captions import CAPTION_STYLE_PRESETS
-        style = CAPTION_STYLE_PRESETS.get(_selected_caption_style_id) or CAPTION_STYLE_PRESETS["bold-yellow"]
+
+        style = (
+            CAPTION_STYLE_PRESETS.get(_selected_caption_style_id)
+            or CAPTION_STYLE_PRESETS["bold-yellow"]
+        )
         session.pipeline_state["caption_style"] = style
         logger.info("🎨 Auto-selected caption style: %s", _selected_caption_style_id)
 
@@ -469,6 +512,7 @@ def _ensure_caption_style(session: "PipelineSession") -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH & INFO
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.get("/api/health", tags=["System"])
 async def health_check():
@@ -479,7 +523,8 @@ async def health_check():
     try:
         phase = _phase_val(
             sessions.active.pipeline_state.get("phase", Phase.IDLE)
-            if sessions.active else Phase.IDLE
+            if sessions.active
+            else Phase.IDLE
         )
     except Exception:
         phase = "idle"
@@ -530,6 +575,7 @@ async def set_project_dir(request: SetProjectDirRequest):
 
     # Save the outgoing project's CRDT before changing the path it targets.
     crdt_mod.save_snapshot()
+    await crdt_mod.disconnect_clients()
     crdt_mod.clear_doc()
     await _close_project_checkpointer()
 
@@ -538,8 +584,17 @@ async def set_project_dir(request: SetProjectDirRequest):
     settings.kinetograph_project_dir = str(project_path)
 
     # Ensure project structure exists
-    for sub in ("media", "media/.synth", "state", "output", ".cache",
-                ".cache/thumbnails", ".cache/waveforms", ".cache/metadata", ".cache/audio"):
+    for sub in (
+        "media",
+        "media/.synth",
+        "state",
+        "output",
+        ".cache",
+        ".cache/thumbnails",
+        ".cache/waveforms",
+        ".cache/metadata",
+        ".cache/audio",
+    ):
         (project_path / sub).mkdir(parents=True, exist_ok=True)
 
     # ── Reload CRDT for the new project ──────────────────────────
@@ -613,7 +668,9 @@ async def update_config(body: ProjectSettings):
             settings.__dict__.pop("_custom_height", None)
     if body.output_width is not None and body.output_height is not None:
         # Override orientation based on dimensions
-        settings.output_orientation = "portrait" if body.output_height > body.output_width else "landscape"
+        settings.output_orientation = (
+            "portrait" if body.output_height > body.output_width else "landscape"
+        )
         # Store as custom overrides
         settings.__dict__["_custom_width"] = body.output_width
         settings.__dict__["_custom_height"] = body.output_height
@@ -687,20 +744,22 @@ async def start_render(request: RenderRequest):
 
     run_id = uuid.uuid4().hex
     render_state = dict(ps)
-    render_state.update({
-        "phase": Phase.IDLE,
-        "approved_edit": approved,
-        "normalized_clips": normalized,
-        "errors": [],
-        "completed_agents": [],
-        "run_id": run_id,
-        "render_settings": {
-            "width": request.width,
-            "height": request.height,
-            "crf": int(_QUALITY_CRF[request.quality]),
-        },
-        "color_grade": _color_grade,
-    })
+    render_state.update(
+        {
+            "phase": Phase.IDLE,
+            "approved_edit": approved,
+            "normalized_clips": normalized,
+            "errors": [],
+            "completed_agents": [],
+            "run_id": run_id,
+            "render_settings": {
+                "width": request.width,
+                "height": request.height,
+                "crf": int(_QUALITY_CRF[request.quality]),
+            },
+            "color_grade": _color_grade,
+        }
+    )
     session.graph = compile_graph(start_from="director", checkpointer=await _project_checkpointer())
     session.config = {"configurable": {"thread_id": f"{session.thread_id}-render-{run_id}"}}
     session.graph_start = "director"
@@ -712,13 +771,15 @@ async def start_render(request: RenderRequest):
     )
     return {
         "status": "started",
-        "message": f"Re-rendering at {request.width}×{request.height} ({request.quality}). Listen on WebSocket for updates.",
+        "message": f"Re-rendering at {request.width}×{request.height} "
+        "({request.quality}). Listen on WebSocket for updates.",
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PIPELINE CONTROL
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.get("/api/pipeline/status", tags=["Pipeline"])
 async def get_pipeline_status():
@@ -760,7 +821,7 @@ async def get_pipeline_status():
 async def run_pipeline(request: RunRequest):
     """
     Start a new pipeline run.
-    
+
     Returns immediately with a thread_id. The pipeline runs asynchronously
     in a background task.  Connect to the WebSocket at /ws to receive
     real-time phase updates. The pipeline will pause at 'awaiting_approval'
@@ -792,10 +853,12 @@ async def run_pipeline(request: RunRequest):
         "normalized_clips": {},
         "render_history": [],
         "completed_agents": [],
-        "color_grade": _color_grade if any(
+        "color_grade": _color_grade
+        if any(
             abs(v - (1.0 if k in ("contrast", "saturation", "gamma") else 0.0)) > 0.001
             for k, v in _color_grade.items()
-        ) else None,
+        )
+        else None,
     }
 
     session.pipeline_state = initial_state.copy()
@@ -804,7 +867,9 @@ async def run_pipeline(request: RunRequest):
     await _broadcast({"type": "pipeline_started", "thread_id": session.thread_id})
 
     # Fire-and-forget: run pipeline in background so the HTTP response returns instantly.
-    session._running_task = asyncio.create_task(_stream_pipeline(session, initial_state, first_node="archivist"))
+    session._running_task = asyncio.create_task(
+        _stream_pipeline(session, initial_state, first_node="archivist")
+    )
 
     return {
         "status": "started",
@@ -839,24 +904,24 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
         if first_node:
             await _broadcast_starting_phase(first_node)
 
-        async for event in session.graph.astream(
-            input_data, session.config, stream_mode="updates"
-        ):
+        async for event in session.graph.astream(input_data, session.config, stream_mode="updates"):
             for node_name, update in event.items():
-                if node_name.startswith("__"):     # skip __interrupt__ etc.
+                if node_name.startswith("__"):  # skip __interrupt__ etc.
                     continue
                 update = _safe_update(update)
                 _merge_state(session.pipeline_state, update)
                 _persist_session(session)
                 phase = update.get("phase", "")
                 phase_str = _phase_val(phase)
-                await _broadcast({
-                    "type": "phase_update",
-                    "node": node_name,
-                    "phase": phase_str,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "errors": update.get("errors", []),
-                })
+                await _broadcast(
+                    {
+                        "type": "phase_update",
+                        "node": node_name,
+                        "phase": phase_str,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "errors": update.get("errors", []),
+                    }
+                )
 
                 # Auto-set default caption style after director completes
                 if node_name == "director" and phase_str != "error":
@@ -878,18 +943,23 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
             if pe:
                 crdt_mod.load_paper_edit(pe)
             _persist_session(session)
-            await _broadcast({
-                "type": "awaiting_approval",
-                "paper_edit": pe,
-            })
+            await _broadcast(
+                {
+                    "type": "awaiting_approval",
+                    "paper_edit": pe,
+                }
+            )
             return
 
         # Pipeline finished — push final paper edit into CRDT doc
-        final_pe = session.pipeline_state.get("approved_edit") or session.pipeline_state.get("paper_edit")
+        final_pe = session.pipeline_state.get("approved_edit") or session.pipeline_state.get(
+            "paper_edit"
+        )
         if final_pe:
             crdt_mod.load_paper_edit(final_pe)
 
-        # Pipeline finished — broadcast completion (with phase so frontend can distinguish success/error)
+        # Pipeline finished — broadcast completion (with phase so frontend can distinguish
+        # success/error)
         final_phase = _phase_val(session.pipeline_state.get("phase", ""))
 
         # Persist non-CRDT timeline data (V2 overlays, music) for project reload
@@ -899,44 +969,57 @@ async def _stream_pipeline(session: "PipelineSession", input_data, first_node: s
         )
         _persist_session(session)
 
-        await _broadcast({
-            "type": "pipeline_complete",
-            "phase": final_phase,
-            "render_path": session.pipeline_state.get("render_path"),
-            "timeline_path": session.pipeline_state.get("timeline_path"),
-            "music_path": session.pipeline_state.get("music_path"),
-            "overlay_clips": session.pipeline_state.get("overlay_clips", []),
-        })
+        await _broadcast(
+            {
+                "type": "pipeline_complete",
+                "phase": final_phase,
+                "render_path": session.pipeline_state.get("render_path"),
+                "timeline_path": session.pipeline_state.get("timeline_path"),
+                "music_path": session.pipeline_state.get("music_path"),
+                "overlay_clips": session.pipeline_state.get("overlay_clips", []),
+            }
+        )
 
     except Exception as exc:
         logger.error(f"Pipeline error: {exc}", exc_info=True)
         session.pipeline_state["phase"] = Phase.ERROR
         _persist_session(session)
-        await _broadcast({
-            "type": "phase_update",
-            "node": "error_handler",
-            "phase": "error",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "errors": [{"agent": "pipeline", "message": str(exc), "phase": "error", "recoverable": False}],
-        })
+        await _broadcast(
+            {
+                "type": "phase_update",
+                "node": "error_handler",
+                "phase": "error",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "errors": [
+                    {
+                        "agent": "pipeline",
+                        "message": str(exc),
+                        "phase": "error",
+                        "recoverable": False,
+                    }
+                ],
+            }
+        )
         # Broadcast pipeline_complete with error phase so frontend shows error, not success
-        await _broadcast({
-            "type": "pipeline_complete",
-            "phase": "error",
-            "render_path": session.pipeline_state.get("render_path"),
-            "timeline_path": session.pipeline_state.get("timeline_path"),
-        })
+        await _broadcast(
+            {
+                "type": "pipeline_complete",
+                "phase": "error",
+                "render_path": session.pipeline_state.get("render_path"),
+                "timeline_path": session.pipeline_state.get("timeline_path"),
+            }
+        )
 
 
 @app.post("/api/pipeline/approve", tags=["Pipeline"])
 async def approve_pipeline(request: ApprovalRequest):
     """
     Approve or reject the Paper Edit and resume the pipeline.
-    
+
     Returns immediately. The pipeline resumes asynchronously in a background task.
     - action='approve': continues to Synthesizer → Director → Sound Engineer → Export
     - action='reject': re-routes back to the Scripter for a new Paper Edit
-    
+
     Optionally include a modified paper_edit if the user edited clips in the UI.
     """
 
@@ -958,9 +1041,9 @@ async def approve_pipeline(request: ApprovalRequest):
     return {
         "status": "started",
         "thread_id": session.thread_id,
-        "message": f"Pipeline resumed with action='{request.action}'. Listen on WebSocket for updates.",
+        "message": f"Pipeline resumed with action='{request.action}'. "
+        "Listen on WebSocket for updates.",
     }
-
 
 
 # ── Node → "in-progress" phase mapping for synthetic WS broadcasts ────────────
@@ -984,13 +1067,15 @@ async def _broadcast_starting_phase(node_name: str) -> None:
     """Broadcast a synthetic 'in-progress' phase update for a node that is about to start."""
     phase = _NODE_STARTING_PHASE.get(node_name)
     if phase:
-        await _broadcast({
-            "type": "phase_update",
-            "node": node_name,
-            "phase": phase,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "errors": [],
-        })
+        await _broadcast(
+            {
+                "type": "phase_update",
+                "node": node_name,
+                "phase": phase,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "errors": [],
+            }
+        )
 
 
 async def _wait_for_caption_style(session: "PipelineSession", timeout: float = 300) -> None:
@@ -1010,10 +1095,12 @@ async def _wait_for_caption_style(session: "PipelineSession", timeout: float = 3
     session._caption_style_event.clear()
 
     # Broadcast the options so the frontend can show a picker
-    await _broadcast({
-        "type": "caption_style_options",
-        "styles": list(CAPTION_STYLE_PRESETS.values()),
-    })
+    await _broadcast(
+        {
+            "type": "caption_style_options",
+            "styles": list(CAPTION_STYLE_PRESETS.values()),
+        }
+    )
 
     logger.info("🎨 Waiting for user to pick a caption style...")
     try:
@@ -1030,13 +1117,38 @@ async def _wait_for_caption_style(session: "PipelineSession", timeout: float = 3
 # the user's natural-language instruction.  No LLM call needed.
 _EDIT_KEYWORDS: list[tuple[list[str], str]] = [
     # Audio / music only
-    (["music", "audio", "sound", "volume", "louder", "quieter", "bgm",
-      "background music", "ducking", "noise"], "sound_engineer"),
+    (
+        [
+            "music",
+            "audio",
+            "sound",
+            "volume",
+            "louder",
+            "quieter",
+            "bgm",
+            "background music",
+            "ducking",
+            "noise",
+        ],
+        "sound_engineer",
+    ),
     # Captions only
     (["caption", "subtitle", "text", "font", "word"], "captioner"),
     # Re-render only (no content change)
-    (["render", "quality", "resolution", "export", "color", "grade",
-      "brightness", "contrast", "saturation"], "director"),
+    (
+        [
+            "render",
+            "quality",
+            "resolution",
+            "export",
+            "color",
+            "grade",
+            "brightness",
+            "contrast",
+            "saturation",
+        ],
+        "director",
+    ),
 ]
 
 
@@ -1056,10 +1168,7 @@ def _classify_edit(instruction: str) -> str:
     best_node = "scripter"
     best_score = 0
     for keywords, start_node in _EDIT_KEYWORDS:
-        score = sum(
-            1 for kw in keywords
-            if re.search(rf"\b{re.escape(kw)}\b", lower)
-        )
+        score = sum(1 for kw in keywords if re.search(rf"\b{re.escape(kw)}\b", lower))
         if score > best_score:
             best_score = score
             best_node = start_node
@@ -1082,7 +1191,9 @@ async def edit_pipeline(request: EditInstructionRequest):
     if session is None:
         raise HTTPException(
             status_code=409,
-            detail="No active pipeline session. Use /api/pipeline/run to start a new pipeline first.",
+            detail=(
+                "No active pipeline session. Use /api/pipeline/run to start a new pipeline first."
+            ),
         )
     if session._running_task and not session._running_task.done():
         raise HTTPException(409, "Pipeline already running. Wait for it to finish.")
@@ -1104,13 +1215,18 @@ async def edit_pipeline(request: EditInstructionRequest):
     edit_state["run_id"] = uuid.uuid4().hex
 
     # Inject current colour-grading settings
-    edit_state["color_grade"] = _color_grade if any(
-        abs(v - (1.0 if k in ("contrast", "saturation", "gamma") else 0.0)) > 0.001
-        for k, v in _color_grade.items()
-    ) else None
+    edit_state["color_grade"] = (
+        _color_grade
+        if any(
+            abs(v - (1.0 if k in ("contrast", "saturation", "gamma") else 0.0)) > 0.001
+            for k, v in _color_grade.items()
+        )
+        else None
+    )
 
     # Inject the user's chosen caption style (stored at module level)
     from kinetograph.core.captions import CAPTION_STYLE_PRESETS
+
     edit_state["caption_style"] = CAPTION_STYLE_PRESETS.get(
         _selected_caption_style_id, CAPTION_STYLE_PRESETS["bold-yellow"]
     )
@@ -1142,10 +1258,12 @@ async def edit_pipeline(request: EditInstructionRequest):
 #  CAPTION STYLE PICKER (user selects before captioner runs)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @app.get("/api/pipeline/caption-styles", tags=["Pipeline"])
 async def get_caption_styles():
     """Return all available caption style presets."""
     from kinetograph.core.captions import CAPTION_STYLE_PRESETS
+
     return {"styles": list(CAPTION_STYLE_PRESETS.values())}
 
 
@@ -1164,7 +1282,10 @@ async def select_caption_style(request: CaptionStyleRequest):
 
     style = CAPTION_STYLE_PRESETS.get(request.style_id)
     if not style:
-        raise HTTPException(400, f"Unknown style: {request.style_id}. Available: {list(CAPTION_STYLE_PRESETS.keys())}")
+        raise HTTPException(
+            400,
+            f"Unknown style: {request.style_id}. Available: {list(CAPTION_STYLE_PRESETS.keys())}",
+        )
 
     _selected_caption_style_id = request.style_id
 
@@ -1309,13 +1430,14 @@ def _find_asset(asset_id: str) -> Path | None:
 
 # ── Metadata Cache (persistent ffprobe results) ───────────────────────────────
 
+
 def _metadata_cache_key(file_path: Path) -> str:
     """Generate a cache key from asset stem + file mtime + file size.
 
     This means the cache auto-invalidates when the file is modified or replaced.
     """
     stat = file_path.stat()
-    raw = f"{file_path.stem}:{stat.st_mtime_ns}:{stat.st_size}"
+    raw = f"{file_path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -1367,6 +1489,7 @@ async def _cached_probe_media_async(file_path: Path) -> dict:
 
 # ── Startup hooks ──────────────────────────────────────────────────────────────
 
+
 @app.patch("/api/assets/{asset_id}/type", tags=["Assets"])
 async def update_asset_type(
     asset_id: str,
@@ -1415,30 +1538,36 @@ async def list_assets():
             try:
                 meta = await _cached_probe_media_async(f)
                 asset_type = "synth" if source_label == "synth" else "media"
-                assets.append({
-                    "id": f.stem,
-                    "file_name": f.name,
-                    "file_path": str(f),
-                    "asset_type": _asset_type_overrides.get(f.stem, asset_type),
-                    "duration_ms": meta["duration_ms"],
-                    "width": meta["width"],
-                    "height": meta["height"],
-                    "fps": meta["fps"],
-                    "has_audio": meta["has_audio"],
-                    "codec": meta["codec"],
-                    "thumbnail_url": f"/api/assets/{f.stem}/thumbnail",
-                    "waveform_url": f"/api/assets/{f.stem}/waveform" if meta["has_audio"] else None,
-                    "stream_url": f"/api/assets/{f.stem}/stream",
-                })
+                assets.append(
+                    {
+                        "id": f.stem,
+                        "file_name": f.name,
+                        "file_path": str(f),
+                        "asset_type": _asset_type_overrides.get(f.stem, asset_type),
+                        "duration_ms": meta["duration_ms"],
+                        "width": meta["width"],
+                        "height": meta["height"],
+                        "fps": meta["fps"],
+                        "has_audio": meta["has_audio"],
+                        "codec": meta["codec"],
+                        "thumbnail_url": f"/api/assets/{f.stem}/thumbnail",
+                        "waveform_url": f"/api/assets/{f.stem}/waveform"
+                        if meta["has_audio"]
+                        else None,
+                        "stream_url": f"/api/assets/{f.stem}/stream",
+                    }
+                )
                 seen_ids.add(f.stem)
             except RuntimeError:
-                assets.append({
-                    "id": f.stem,
-                    "file_name": f.name,
-                    "file_path": str(f),
-                    "asset_type": _asset_type_overrides.get(f.stem, "media"),
-                    "error": "Failed to probe file — may be corrupt",
-                })
+                assets.append(
+                    {
+                        "id": f.stem,
+                        "file_name": f.name,
+                        "file_path": str(f),
+                        "asset_type": _asset_type_overrides.get(f.stem, "media"),
+                        "error": "Failed to probe file — may be corrupt",
+                    }
+                )
                 seen_ids.add(f.stem)
 
     # 2. Referenced (external) files — not physically in project dirs
@@ -1447,39 +1576,47 @@ async def list_assets():
             continue  # already listed from physical scan (symlink or copy)
         ref_path = Path(ref_path_str)
         if not ref_path.exists():
-            assets.append({
-                "id": asset_id,
-                "file_name": ref_path.name,
-                "file_path": ref_path_str,
-                "asset_type": "media",
-                "error": f"Media offline — original file not found: {ref_path_str}",
-            })
+            assets.append(
+                {
+                    "id": asset_id,
+                    "file_name": ref_path.name,
+                    "file_path": ref_path_str,
+                    "asset_type": "media",
+                    "error": f"Media offline — original file not found: {ref_path_str}",
+                }
+            )
             continue
         try:
             meta = await _cached_probe_media_async(ref_path)
-            assets.append({
-                "id": asset_id,
-                "file_name": ref_path.name,
-                "file_path": ref_path_str,
-                "asset_type": _asset_type_overrides.get(asset_id, "media"),
-                "duration_ms": meta["duration_ms"],
-                "width": meta["width"],
-                "height": meta["height"],
-                "fps": meta["fps"],
-                "has_audio": meta["has_audio"],
-                "codec": meta["codec"],
-                "thumbnail_url": f"/api/assets/{asset_id}/thumbnail",
-                "waveform_url": f"/api/assets/{asset_id}/waveform" if meta["has_audio"] else None,
-                "stream_url": f"/api/assets/{asset_id}/stream",
-            })
+            assets.append(
+                {
+                    "id": asset_id,
+                    "file_name": ref_path.name,
+                    "file_path": ref_path_str,
+                    "asset_type": _asset_type_overrides.get(asset_id, "media"),
+                    "duration_ms": meta["duration_ms"],
+                    "width": meta["width"],
+                    "height": meta["height"],
+                    "fps": meta["fps"],
+                    "has_audio": meta["has_audio"],
+                    "codec": meta["codec"],
+                    "thumbnail_url": f"/api/assets/{asset_id}/thumbnail",
+                    "waveform_url": f"/api/assets/{asset_id}/waveform"
+                    if meta["has_audio"]
+                    else None,
+                    "stream_url": f"/api/assets/{asset_id}/stream",
+                }
+            )
         except RuntimeError:
-            assets.append({
-                "id": asset_id,
-                "file_name": ref_path.name,
-                "file_path": ref_path_str,
-                "asset_type": "media",
-                "error": "Failed to probe file — may be corrupt",
-            })
+            assets.append(
+                {
+                    "id": asset_id,
+                    "file_name": ref_path.name,
+                    "file_path": ref_path_str,
+                    "asset_type": "media",
+                    "error": "Failed to probe file — may be corrupt",
+                }
+            )
 
     return {"assets": assets, "total": len(assets)}
 
@@ -1517,13 +1654,20 @@ async def get_asset_thumbnail(
         result = await asyncio.to_thread(
             subprocess.run,
             [
-                "ffmpeg", "-y",
-                "-ss", str(t),
-                "-i", str(video_path),
-                "-vframes", "1",
-                "-vf", "scale=320:-1",
-                "-f", "image2",
-                "-c:v", "mjpeg",
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(t),
+                "-i",
+                str(video_path),
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=320:-1",
+                "-f",
+                "image2",
+                "-c:v",
+                "mjpeg",
                 str(cache_file),
             ],
             capture_output=True,
@@ -1577,13 +1721,18 @@ async def get_asset_waveform(
         result = await asyncio.to_thread(
             subprocess.run,
             [
-                "ffmpeg", "-y",
-                "-i", str(video_path),
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
                 "-filter_complex",
                 f"aformat=channel_layouts=mono,showwavespic=s={width}x{height}:colors=#00d4ff",
-                "-frames:v", "1",
-                "-f", "image2",
-                "-c:v", "png",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2",
+                "-c:v",
+                "png",
                 str(cache_file),
             ],
             capture_output=True,
@@ -1659,14 +1808,16 @@ async def register_asset(body: dict):
         if asset_id in _media_refs and _media_refs[asset_id] == file_path_str:
             try:
                 meta = await _cached_probe_media_async(file_path)
-                results.append({
-                    "status": "already_registered",
-                    "id": asset_id,
-                    "file_name": file_path.name,
-                    "file_path": file_path_str,
-                    "asset_type": "media",
-                    **meta,
-                })
+                results.append(
+                    {
+                        "status": "already_registered",
+                        "id": asset_id,
+                        "file_name": file_path.name,
+                        "file_path": file_path_str,
+                        "asset_type": "media",
+                        **meta,
+                    }
+                )
             except RuntimeError as exc:
                 results.append({"file_path": file_path_str, "error": str(exc)})
             continue
@@ -1696,21 +1847,27 @@ async def register_asset(body: dict):
             except OSError:
                 # Symlink creation failed (e.g. cross-device on some filesystems)
                 # Fall back to no symlink — the asset index has the original path
-                logger.warning(f"📂 Symlink creation failed for {file_path.name}, using reference only")
+                logger.warning(
+                    f"📂 Symlink creation failed for {file_path.name}, using reference only"
+                )
 
         try:
             meta = await _cached_probe_media_async(file_path)
-            results.append({
-                "status": "registered",
-                "id": asset_id,
-                "file_name": file_path.name,
-                "file_path": file_path_str,
-                "asset_type": "media",
-                "thumbnail_url": f"/api/assets/{asset_id}/thumbnail",
-                "waveform_url": f"/api/assets/{asset_id}/waveform" if meta.get("has_audio") else None,
-                "stream_url": f"/api/assets/{asset_id}/stream",
-                **meta,
-            })
+            results.append(
+                {
+                    "status": "registered",
+                    "id": asset_id,
+                    "file_name": file_path.name,
+                    "file_path": file_path_str,
+                    "asset_type": "media",
+                    "thumbnail_url": f"/api/assets/{asset_id}/thumbnail",
+                    "waveform_url": f"/api/assets/{asset_id}/waveform"
+                    if meta.get("has_audio")
+                    else None,
+                    "stream_url": f"/api/assets/{asset_id}/stream",
+                    **meta,
+                }
+            )
         except RuntimeError as exc:
             _media_refs.pop(asset_id, None)
             results.append({"file_path": file_path_str, "error": f"Corrupt file: {exc}"})
@@ -1719,7 +1876,11 @@ async def register_asset(body: dict):
     _save_media_refs()
     _rebuild_asset_index()
 
-    return {"status": "ok", "registered": len([r for r in results if "error" not in r]), "results": results}
+    return {
+        "status": "ok",
+        "registered": len([r for r in results if "error" not in r]),
+        "results": results,
+    }
 
 
 @app.post("/api/assets/upload", tags=["Assets"])
@@ -1823,7 +1984,9 @@ async def delete_asset(asset_id: str):
         # Clean up cached thumbnails, waveforms, metadata for this asset
         _purge_asset_caches(asset_id)
 
-        logger.info(f"📂 Unlinked referenced asset: {asset_id} (original untouched: {original_path})")
+        logger.info(
+            f"📂 Unlinked referenced asset: {asset_id} (original untouched: {original_path})"
+        )
         _rebuild_asset_index()
         return {"status": "unlinked", "asset_id": asset_id, "original_path": original_path}
 
@@ -1865,6 +2028,7 @@ def _purge_asset_caches(asset_id: str) -> None:
 
 
 # ── Cache Management Endpoint ──────────────────────────────────────────────────
+
 
 @app.delete("/api/cache", tags=["System"])
 async def purge_cache(
@@ -1977,11 +2141,12 @@ def _human_size(size_bytes: int) -> str:
 #  MASTER INDEX (transcript + visual context)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @app.get("/api/master-index", tags=["Index"])
 async def get_master_index():
     """
     Get the full master index — transcript + visual descriptions for every segment.
-    
+
     Each entry maps a time range in a source file to its spoken words
     (with word-level timestamps) and VLM-generated scene descriptions.
     """
@@ -1999,7 +2164,7 @@ async def search_master_index(
 ):
     """
     Search the master index by keyword.
-    
+
     Returns segments where the transcript or visual description contains the query.
     Useful for the frontend's clip search / cutaway suggestion feature.
     """
@@ -2030,7 +2195,11 @@ def _resolve_synth_source_files(edit: dict, synth_assets: list[dict]) -> None:
     """Replace __SYNTH__ source_file with the actual file path from synth_assets."""
     if not synth_assets:
         return
-    sa_map = {sa["clip_id"]: sa["file_path"] for sa in synth_assets if "clip_id" in sa and "file_path" in sa}
+    sa_map = {
+        sa["clip_id"]: sa["file_path"]
+        for sa in synth_assets
+        if "clip_id" in sa and "file_path" in sa
+    }
     for clip in edit.get("clips", []):
         if clip.get("source_file") in ("__SYNTH__", "SYNTHESIZE", ""):
             real_path = sa_map.get(clip["clip_id"])
@@ -2138,11 +2307,12 @@ async def save_paper_edit(edit: dict):
 #  OUTPUT FILES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @app.get("/api/output", tags=["Output"])
 async def list_output_files():
     """
     List all output files (rendered videos, timelines).
-    
+
     Returns download URLs for each output file.
     """
     output_dir = settings.output_dir
@@ -2154,13 +2324,15 @@ async def list_output_files():
         if not f.is_file() or f.name == ".gitkeep":
             continue
         relative_name = f.relative_to(output_dir).as_posix()
-        files.append({
-            "file_name": relative_name,
-            "file_path": str(f),
-            "size_bytes": f.stat().st_size,
-            "download_url": f"/api/output/{relative_name}",
-            "type": f.suffix.lstrip("."),
-        })
+        files.append(
+            {
+                "file_name": relative_name,
+                "file_path": str(f),
+                "size_bytes": f.stat().st_size,
+                "download_url": f"/api/output/{relative_name}",
+                "type": f.suffix.lstrip("."),
+            }
+        )
 
     return {"files": files, "total": len(files)}
 
@@ -2184,10 +2356,12 @@ async def download_output(filename: str):
 
 
 @app.get("/api/assets/stream", tags=["Assets"])
-async def stream_asset_by_path(path: str = Query(..., description="Absolute path to the media file")):
+async def stream_asset_by_path(
+    path: str = Query(..., description="Absolute path to the media file"),
+):
     """
     Stream any media file by its absolute path.
-    
+
     Used as a fallback when clip source_file doesn't match any catalogued asset.
     Only allows files within the project's media_drop or output directories.
     """
@@ -2226,19 +2400,21 @@ async def stream_asset_by_path(path: str = Query(..., description="Absolute path
 #  WEBSOCKET (real-time pipeline events)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     """
     WebSocket endpoint for real-time pipeline events.
-    
+
     Events pushed from server → client:
-    
+
     - {"type": "pipeline_started", "thread_id": "..."}
-    - {"type": "phase_update", "node": "archivist", "phase": "indexed", "timestamp": "...", "errors": [...]}
+    - {"type": "phase_update", "node": "archivist", "phase": "indexed", "timestamp": "...",
+    "errors": [...]}
     - {"type": "awaiting_approval", "paper_edit": {...}}
-    
+
     Client → server messages:
-    
+
     - {"type": "ping"} → server responds with {"type": "pong"}
     """
     await ws.accept()
@@ -2247,23 +2423,34 @@ async def websocket_endpoint(ws: WebSocket):
     # Send current state on connect (includes timeline extras for project reload)
     s = sessions.active
     extras = _timeline_extras or {}
-    await ws.send_text(json.dumps({
-        "type": "connected",
-        "phase": _phase_val(s.pipeline_state.get("phase", Phase.IDLE) if s else Phase.IDLE),
-        "version": __version__,
-        "overlay_clips": extras.get("overlay_clips", []),
-        "music_path": extras.get("music_path"),
-    }, default=_json_default))
+    await ws.send_text(
+        json.dumps(
+            {
+                "type": "connected",
+                "phase": _phase_val(s.pipeline_state.get("phase", Phase.IDLE) if s else Phase.IDLE),
+                "version": __version__,
+                "overlay_clips": extras.get("overlay_clips", []),
+                "music_path": extras.get("music_path"),
+            },
+            default=_json_default,
+        )
+    )
 
     # If the pipeline is currently waiting for a caption style pick, re-send
     # the caption_style_options event so reconnected clients see the picker.
     if s and not s.pipeline_state.get("caption_style") and not s._caption_style_event.is_set():
         from kinetograph.core.captions import CAPTION_STYLE_PRESETS
+
         try:
-            await ws.send_text(json.dumps({
-                "type": "caption_style_options",
-                "styles": list(CAPTION_STYLE_PRESETS.values()),
-            }, default=_json_default))
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "type": "caption_style_options",
+                        "styles": list(CAPTION_STYLE_PRESETS.values()),
+                    },
+                    default=_json_default,
+                )
+            )
         except Exception:
             pass
 
@@ -2283,6 +2470,7 @@ async def websocket_endpoint(ws: WebSocket):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CRDT WEBSOCKET (Yjs document sync)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @app.websocket("/ws/crdt/{room}")
 async def crdt_websocket_endpoint(ws: WebSocket, room: str = "default"):
@@ -2304,6 +2492,7 @@ async def crdt_websocket_endpoint(ws: WebSocket, room: str = "default"):
     """
     await ws.accept()
     await crdt_mod.add_client(ws)
+    connected_doc = crdt_mod.doc
 
     try:
         # Send the server's full state as sync-step-2 so the client catches up.
@@ -2312,6 +2501,8 @@ async def crdt_websocket_endpoint(ws: WebSocket, room: str = "default"):
 
         while True:
             data = await ws.receive_bytes()
+            if connected_doc is not crdt_mod.doc:
+                break
             if len(data) < 1:
                 continue
 

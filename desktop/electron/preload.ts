@@ -5,6 +5,7 @@ import { contextBridge, ipcRenderer } from "electron";
 const electronAPI = {
   // Project management
   openProject: () => ipcRenderer.invoke("open-project") as Promise<string | null>,
+  openRecentProject: (projectDir: string) => ipcRenderer.invoke("open-recent-project", projectDir) as Promise<string | null>,
   newProject: () => ipcRenderer.invoke("new-project") as Promise<string | null>,
   importMedia: () => ipcRenderer.invoke("import-media") as Promise<string[]>,
   getProjectDir: () => ipcRenderer.invoke("get-project-dir") as Promise<string | null>,

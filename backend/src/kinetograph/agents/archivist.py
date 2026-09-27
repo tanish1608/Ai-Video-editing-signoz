@@ -30,25 +30,26 @@ import httpx
 from elevenlabs import ElevenLabs
 
 from kinetograph.config import settings
+from kinetograph.core.media import (
+    IMAGE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    extract_audio_async,
+    extract_video_segments_async,
+    probe_media,
+)
 from kinetograph.observability import (
     llm_span,
     record_nvidia_tokens,
     tool_span,
 )
 from kinetograph.schema import SegmentVisual, VisualCategory
-from kinetograph.core.media import (
-    VIDEO_EXTENSIONS,
-    IMAGE_EXTENSIONS,
-    extract_audio_async,
-    extract_video_segments_async,
-    probe_media,
-)
 from kinetograph.state import GraphState, Phase
 
 logger = logging.getLogger(__name__)
 
 
 # ─── VLM Interaction (NVIDIA Nemotron — video-native) ─────────────────────────
+
 
 def _encode_image_base64(image_path: str) -> str:
     """Read an image file and return its base64 encoding."""
@@ -92,15 +93,20 @@ def _build_vlm_prompt(transcript_slice: str = "") -> str:
         "reviewing sequential frames (2 FPS) from a short video segment."
         f"{audio_ctx}"
         "\nReturn a SINGLE JSON object with EXACTLY these keys:\n"
-        "  subject   — who/what is the primary focus (specific: 'Two engineers pair-programming on a MacBook', not 'people using a computer')\n"
+        "  subject   — who/what is the primary focus (specific: 'Two "
+        "engineers pair-programming on a MacBook', not 'people using a computer')\n"
         "  setting   — where this is (e.g. 'indoor co-working space with neon lighting')\n"
         "  action    — the motion/change across frames (say 'static, no motion' if none)\n"
         "  notable   — visible text, logos, graphics, distinctive elements (empty string if none)\n"
-        "  clip_type — EXACTLY one of: TALKING_HEAD, SCENIC, ACTION, TEXT_OVERLAY, TRANSITION, OTHER\n"
+        "  clip_type — EXACTLY one of: TALKING_HEAD, SCENIC, ACTION, "
+        "TEXT_OVERLAY, TRANSITION, OTHER\n"
         "  energy    — number 0.0-1.0: visual intensity/motion (0=static, 1=fast/dynamic)\n"
-        "  salience  — number 0.0-1.0: how highlight-worthy/attention-grabbing this moment is for a punchy short\n"
-        "  emotion   — one word for the dominant mood (e.g. 'excited', 'calm', 'tense', 'neutral')\n\n"
-        "Be specific and decisive; omit hedging. Output ONLY the JSON object, no prose, no code fences."
+        "  salience  — number 0.0-1.0: how "
+        "highlight-worthy/attention-grabbing this moment is for a punchy short\n"
+        "  emotion   — one word for the dominant mood (e.g. 'excited', "
+        "'calm', 'tense', 'neutral')\n\n"
+        "Be specific and decisive; omit hedging. Output ONLY the JSON "
+        "object, no prose, no code fences."
     )
 
 
@@ -132,10 +138,12 @@ async def _describe_segment_vlm(
     content: list[dict] = [{"type": "text", "text": prompt}]
     for fp in frame_paths:
         b64 = _encode_image_base64(fp)
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-        })
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            }
+        )
 
     payload = {
         "model": settings.vlm_model,
@@ -152,7 +160,9 @@ async def _describe_segment_vlm(
     }
 
     async with sem:
-        with llm_span("nvidia", settings.vlm_model, **{"kinetograph.segment_start_ms": segment["start_ms"]}) as _vlm_span:
+        with llm_span(
+            "nvidia", settings.vlm_model, **{"kinetograph.segment_start_ms": segment["start_ms"]}
+        ) as _vlm_span:
             try:
                 resp = None
                 last_exc = None
@@ -176,7 +186,7 @@ async def _describe_segment_vlm(
 
                         if resp.status_code >= 500:
                             logger.warning(f"VLM server error {resp.status_code}, retrying...")
-                            await asyncio.sleep(2 ** attempt)
+                            await asyncio.sleep(2**attempt)
                             continue
 
                         resp.raise_for_status()
@@ -188,7 +198,7 @@ async def _describe_segment_vlm(
                             logger.warning(
                                 f"VLM timeout for segment "
                                 f"{segment['start_ms']}-{segment['end_ms']}ms "
-                                f"(attempt {attempt+1}/3), retrying..."
+                                f"(attempt {attempt + 1}/3), retrying..."
                             )
                             await asyncio.sleep(1)
                         continue
@@ -197,7 +207,8 @@ async def _describe_segment_vlm(
 
                 if resp is None or resp.status_code != 200:
                     raise RuntimeError(
-                        last_exc or f"VLM failed after 3 attempts (status={getattr(resp, 'status_code', '?')})"
+                        last_exc
+                        or f"VLM retries exhausted (status={getattr(resp, 'status_code', '?')})"
                     )
 
                 data = resp.json()
@@ -285,7 +296,8 @@ def _transcript_slice_for(words: list[dict], start_ms: int, end_ms: int) -> str:
     toks = [
         w.get("text", "")
         for w in words
-        if w.get("end_ms", 0) > start_ms and w.get("start_ms", 0) < end_ms
+        if w.get("end_ms", 0) > start_ms
+        and w.get("start_ms", 0) < end_ms
         and w.get("text", "").strip()
     ]
     return " ".join(toks).strip()
@@ -316,7 +328,10 @@ async def _analyze_video_segments(
     tasks = [
         asyncio.ensure_future(
             _describe_segment_vlm(
-                seg, asset_type, client, sem,
+                seg,
+                asset_type,
+                client,
+                sem,
                 transcript_slice=_transcript_slice_for(words, seg["start_ms"], seg["end_ms"]),
             )
         )
@@ -351,6 +366,7 @@ async def _analyze_video_segments(
 
 # ─── ElevenLabs STT ───────────────────────────────────────────────────────────
 
+
 def _transcribe_audio(audio_path: str) -> dict:
     """
     Transcribe audio using ElevenLabs Scribe.
@@ -359,8 +375,10 @@ def _transcribe_audio(audio_path: str) -> dict:
     """
     client = ElevenLabs(api_key=settings.elevenlabs_api_key)
 
-    with open(audio_path, "rb") as audio_file, \
-            tool_span("elevenlabs_stt", **{"stt.model": settings.elevenlabs_stt_model}):
+    with (
+        open(audio_path, "rb") as audio_file,
+        tool_span("elevenlabs_stt", **{"stt.model": settings.elevenlabs_stt_model}),
+    ):
         result = client.speech_to_text.convert(
             file=audio_file,
             model_id=settings.elevenlabs_stt_model,
@@ -373,12 +391,14 @@ def _transcribe_audio(audio_path: str) -> dict:
     words = []
     if hasattr(result, "words") and result.words:
         for w in result.words:
-            words.append({
-                "text": w.text,
-                "start_ms": int(w.start * 1000) if hasattr(w, "start") else 0,
-                "end_ms": int(w.end * 1000) if hasattr(w, "end") else 0,
-                "speaker_id": getattr(w, "speaker_id", None),
-            })
+            words.append(
+                {
+                    "text": w.text,
+                    "start_ms": int(w.start * 1000) if hasattr(w, "start") else 0,
+                    "end_ms": int(w.end * 1000) if hasattr(w, "end") else 0,
+                    "speaker_id": getattr(w, "speaker_id", None),
+                }
+            )
 
     return {
         "text": result.text if hasattr(result, "text") else "",
@@ -387,6 +407,7 @@ def _transcribe_audio(audio_path: str) -> dict:
 
 
 # ─── Discovery ────────────────────────────────────────────────────────────────
+
 
 def _discover_media_files() -> list[dict]:
     """Scan media/ for all supported video and image files.
@@ -409,17 +430,19 @@ def _discover_media_files() -> list[dict]:
             is_image = f.suffix.lower() in IMAGE_EXTENSIONS
             try:
                 meta = probe_media(f)
-                files.append({
-                    "file_path": str(f),
-                    "file_name": f.name,
-                    "media_type": "image" if is_image else "video",
-                    "duration_ms": meta["duration_ms"],
-                    "width": meta["width"],
-                    "height": meta["height"],
-                    "fps": meta["fps"],
-                    "has_audio": meta["has_audio"],
-                    "is_image": is_image,
-                })
+                files.append(
+                    {
+                        "file_path": str(f),
+                        "file_name": f.name,
+                        "media_type": "image" if is_image else "video",
+                        "duration_ms": meta["duration_ms"],
+                        "width": meta["width"],
+                        "height": meta["height"],
+                        "fps": meta["fps"],
+                        "has_audio": meta["has_audio"],
+                        "is_image": is_image,
+                    }
+                )
             except RuntimeError as exc:
                 logger.error(f"Skipping corrupt file {f}: {exc}")
     return files
@@ -549,15 +572,11 @@ def _build_asset_index(
             seg_e = seg_words[-1]["end_ms"]
 
             overlapping_visuals = [
-                vs for vs in visual_segments
-                if vs["end_ms"] > seg_s and vs["start_ms"] < seg_e
+                vs for vs in visual_segments if vs["end_ms"] > seg_s and vs["start_ms"] < seg_e
             ]
 
             # Skip regions that fall within this segment's time range
-            seg_skips = [
-                (s, e) for s, e in all_skip_regions
-                if e > seg_s and s < seg_e
-            ]
+            seg_skips = [(s, e) for s, e in all_skip_regions if e > seg_s and s < seg_e]
 
             # Collect content tags from VLM analysis
             content_tags = list({vs["clip_type"] for vs in overlapping_visuals})
@@ -568,24 +587,26 @@ def _build_asset_index(
             energy = max((vs.get("energy", 0.0) for vs in overlapping_visuals), default=0.0)
             emotions = [vs.get("emotion", "") for vs in overlapping_visuals if vs.get("emotion")]
 
-            entries.append({
-                "asset_file": file_path,
-                "media_type": asset.get("media_type", "video"),
-                "has_speech": has_speech,
-                "content_tags": content_tags,
-                "start_ms": seg_s,
-                "end_ms": seg_e,
-                "transcript": " ".join(sw["text"] for sw in seg_words),
-                "words": seg_words,
-                "skip_regions": seg_skips,
-                "visual_descriptions": [vs["description"] for vs in overlapping_visuals],
-                "clip_types": content_tags,  # kept for backward compat
-                "speaker_id": seg_words[0].get("speaker_id"),
-                # Editorial signal for ranking (Scripter/Critic)
-                "salience": round(salience, 3),
-                "energy": round(energy, 3),
-                "emotion": emotions[0] if emotions else "",
-            })
+            entries.append(
+                {
+                    "asset_file": file_path,
+                    "media_type": asset.get("media_type", "video"),
+                    "has_speech": has_speech,
+                    "content_tags": content_tags,
+                    "start_ms": seg_s,
+                    "end_ms": seg_e,
+                    "transcript": " ".join(sw["text"] for sw in seg_words),
+                    "words": seg_words,
+                    "skip_regions": seg_skips,
+                    "visual_descriptions": [vs["description"] for vs in overlapping_visuals],
+                    "clip_types": content_tags,  # kept for backward compat
+                    "speaker_id": seg_words[0].get("speaker_id"),
+                    # Editorial signal for ranking (Scripter/Critic)
+                    "salience": round(salience, 3),
+                    "energy": round(energy, 3),
+                    "emotion": emotions[0] if emotions else "",
+                }
+            )
 
         for w in cleaned_words:
             segment_words.append(w)
@@ -601,28 +622,31 @@ def _build_asset_index(
         _flush(segment_words)
     else:
         for vs in visual_segments:
-            entries.append({
-                "asset_file": file_path,
-                "media_type": asset.get("media_type", "video"),
-                "has_speech": False,
-                "content_tags": [vs["clip_type"]],
-                "start_ms": vs["start_ms"],
-                "end_ms": vs["end_ms"],
-                "transcript": "",
-                "words": [],
-                "skip_regions": [],
-                "visual_descriptions": [vs["description"]],
-                "clip_types": [vs["clip_type"]],
-                "speaker_id": None,
-                "salience": round(vs.get("salience", 0.0), 3),
-                "energy": round(vs.get("energy", 0.0), 3),
-                "emotion": vs.get("emotion", ""),
-            })
+            entries.append(
+                {
+                    "asset_file": file_path,
+                    "media_type": asset.get("media_type", "video"),
+                    "has_speech": False,
+                    "content_tags": [vs["clip_type"]],
+                    "start_ms": vs["start_ms"],
+                    "end_ms": vs["end_ms"],
+                    "transcript": "",
+                    "words": [],
+                    "skip_regions": [],
+                    "visual_descriptions": [vs["description"]],
+                    "clip_types": [vs["clip_type"]],
+                    "speaker_id": None,
+                    "salience": round(vs.get("salience", 0.0), 3),
+                    "energy": round(vs.get("energy", 0.0), 3),
+                    "emotion": vs.get("emotion", ""),
+                }
+            )
 
     return entries
 
 
 # ─── Agent Entry Point ────────────────────────────────────────────────────────
+
 
 async def archivist_node(state: GraphState) -> dict:
     """
@@ -642,12 +666,14 @@ async def archivist_node(state: GraphState) -> dict:
     if not raw_assets:
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "archivist",
-                "message": "No media files found in media/ directory",
-                "phase": Phase.INGESTING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "archivist",
+                    "message": "No media files found in media/ directory",
+                    "phase": Phase.INGESTING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     logger.info(f"🗄️  Archivist: Found {len(raw_assets)} raw assets")
@@ -657,7 +683,6 @@ async def archivist_node(state: GraphState) -> dict:
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     async with httpx.AsyncClient() as http_client:
-
         # ONE semaphore shared across every asset — otherwise a per-asset
         # semaphore combined with concurrent asset processing gives an effective
         # concurrency of vlm_concurrency × N_assets, blowing past rate limits.
@@ -697,7 +722,9 @@ async def archivist_node(state: GraphState) -> dict:
                     # ElevenLabs SDK is sync — run in a thread to avoid blocking
                     loop = asyncio.get_running_loop()
                     transcript_data = await loop.run_in_executor(
-                        None, _transcribe_audio, str(audio_path),
+                        None,
+                        _transcribe_audio,
+                        str(audio_path),
                     )
                 except Exception as exc:
                     logger.error(f"🗄️  Transcription failed for {asset['file_name']}: {exc}")
@@ -713,7 +740,10 @@ async def archivist_node(state: GraphState) -> dict:
                 # 4. Analyze all segments concurrently (shared VLM semaphore),
                 #    grounding each in the speech spoken during it (A/V fusion).
                 visual_segments = await _analyze_video_segments(
-                    segments, "media", http_client, vlm_sem,
+                    segments,
+                    "media",
+                    http_client,
+                    vlm_sem,
                     words=transcript_data.get("words", []),
                 )
             except Exception as exc:
@@ -740,6 +770,7 @@ async def archivist_node(state: GraphState) -> dict:
     # Extracted audio and keyframes are only needed during indexing.
     # Clean them up to avoid unbounded disk growth across pipeline runs.
     import shutil as _shutil
+
     if temp_dir.exists():
         try:
             _shutil.rmtree(temp_dir)

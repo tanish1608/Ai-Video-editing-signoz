@@ -105,9 +105,14 @@ def _pick_vibe(video_description: str) -> dict:
         resp = client.models.generate_content(
             model=settings.gemini_model,
             contents=[
-                types.Content(role="user", parts=[
-                    types.Part.from_text(text=f"{_VIBE_SYSTEM_PROMPT}\n\nVideo description:\n{video_description}"),
-                ]),
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(
+                            text=f"{_VIBE_SYSTEM_PROMPT}\n\nVideo description:\n{video_description}"
+                        ),
+                    ],
+                ),
             ],
             config=types.GenerateContentConfig(
                 temperature=0.3,
@@ -118,9 +123,11 @@ def _pick_vibe(video_description: str) -> dict:
 
         raw = resp.text.strip()
         data = json.loads(raw)
-        logger.info(f"🎵 Music: LLM picked vibe → {data.get('mood', '?')} / "
-                     f"{data.get('genre', '?')} / energy={data.get('energy', '?')} "
-                     f"({data.get('reasoning', '')})")
+        logger.info(
+            f"🎵 Music: LLM picked vibe → {data.get('mood', '?')} / "
+            f"{data.get('genre', '?')} / energy={data.get('energy', '?')} "
+            f"({data.get('reasoning', '')})"
+        )
         return data
 
     except Exception as exc:
@@ -129,6 +136,7 @@ def _pick_vibe(video_description: str) -> dict:
 
 
 # ─── Soundstripe API Client ───────────────────────────────────────────────────
+
 
 def _search_songs(filters: dict, max_results: int = 5) -> list[dict]:
     """
@@ -186,30 +194,29 @@ def _search_songs(filters: dict, max_results: int = 5) -> list[dict]:
         # Attach audio_file data to each song
         results = []
         for song in songs:
-            audio_refs = (
-                song.get("relationships", {})
-                .get("audio_files", {})
-                .get("data", [])
-            )
+            audio_refs = song.get("relationships", {}).get("audio_files", {}).get("data", [])
             audio_files = []
             for ref in audio_refs:
                 af = audio_lookup.get(ref.get("id"))
                 if af:
                     audio_files.append(af)
 
-            results.append({
-                "id": song["id"],
-                "title": song.get("attributes", {}).get("title", "Unknown"),
-                "bpm": song.get("attributes", {}).get("bpm"),
-                "tags": song.get("attributes", {}).get("tags", {}),
-                "audio_files": audio_files,
-            })
+            results.append(
+                {
+                    "id": song["id"],
+                    "title": song.get("attributes", {}).get("title", "Unknown"),
+                    "bpm": song.get("attributes", {}).get("bpm"),
+                    "tags": song.get("attributes", {}).get("tags", {}),
+                    "audio_files": audio_files,
+                }
+            )
 
         return results
 
     except httpx.HTTPStatusError as exc:
-        logger.error(f"🎵 Music: Soundstripe API error {exc.response.status_code}: "
-                     f"{exc.response.text[:300]}")
+        logger.error(
+            f"🎵 Music: Soundstripe API error {exc.response.status_code}: {exc.response.text[:300]}"
+        )
         return []
     except Exception as exc:
         logger.error(f"🎵 Music: Soundstripe search failed: {exc}")
@@ -231,6 +238,7 @@ def _download_audio(url: str, output_path: Path) -> Path:
 
 
 # ─── Public API ────────────────────────────────────────────────────────────────
+
 
 def is_configured() -> bool:
     """Check if Soundstripe API is configured."""
@@ -334,9 +342,11 @@ def fetch_background_music(
         return output_path
 
     try:
-        logger.info(f"🎵 Music: Downloading '{best_song['title']}' "
-                     f"(BPM={best_song.get('bpm')}, "
-                     f"mood={best_song.get('tags', {}).get('mood', '?')})")
+        logger.info(
+            f"🎵 Music: Downloading '{best_song['title']}' "
+            f"(BPM={best_song.get('bpm')}, "
+            f"mood={best_song.get('tags', {}).get('mood', '?')})"
+        )
         return _download_audio(url, output_path)
     except Exception as exc:
         logger.error(f"🎵 Music: Download failed: {exc}")
@@ -360,9 +370,7 @@ def build_video_description(
         # Music prompt is the scripter's explicit creative direction — prioritise it
         music_prompt = approved_edit.get("music_prompt")
         if music_prompt:
-            parts.append(
-                f"EDITOR'S MUSIC DIRECTION (highest priority): {music_prompt}"
-            )
+            parts.append(f"EDITOR'S MUSIC DIRECTION (highest priority): {music_prompt}")
 
         title = approved_edit.get("title", "")
         if title:

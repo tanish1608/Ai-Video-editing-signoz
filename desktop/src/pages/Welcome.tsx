@@ -1,7 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Film, FolderOpen, Plus, Settings, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { resetForProjectSwitch } from "@/lib/project-session";
 
 interface WelcomeProps {
   backendStatus: "starting" | "running" | "error" | "stopped";
@@ -15,19 +14,10 @@ export function Welcome({ backendStatus, onOpenEditor }: WelcomeProps) {
     window.electron?.getRecentProjects().then(setRecentProjects).catch(() => {});
   }, []);
 
-  /** Clean slate before entering the editor for a (potentially different) project. */
-  const prepareAndOpen = useCallback(() => {
-    // Disconnect any lingering CRDT provider & wipe the Yjs doc so the
-    // backend's sync-step-2 repopulates with the correct project data.
-    resetForProjectSwitch();
-    onOpenEditor();
-  }, [onOpenEditor]);
-
   const handleNewProject = async () => {
     const dir = await window.electron?.newProject();
     if (dir) {
       await window.electron?.addRecentProject(dir);
-      prepareAndOpen();
     }
   };
 
@@ -35,27 +25,12 @@ export function Welcome({ backendStatus, onOpenEditor }: WelcomeProps) {
     const dir = await window.electron?.openProject();
     if (dir) {
       await window.electron?.addRecentProject(dir);
-      prepareAndOpen();
     }
   };
 
   const handleOpenRecent = async (projectPath: string) => {
-    // For recent projects we need to tell the backend which project to load.
-    // openProject() shows a dialog; for recents we POST the dir directly.
-    try {
-      const backendUrl = await window.electron?.getBackendUrl();
-      if (backendUrl) {
-        await fetch(`${backendUrl}/api/project/set-dir`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ project_dir: projectPath }),
-        });
-      }
-    } catch (e) {
-      console.warn("Failed to set project dir on backend for recent project:", e);
-    }
-    await window.electron?.addRecentProject(projectPath);
-    prepareAndOpen();
+    const dir = await window.electron?.openRecentProject(projectPath);
+    if (dir) await window.electron?.addRecentProject(dir);
   };
 
   const statusColor = {
@@ -139,7 +114,7 @@ export function Welcome({ backendStatus, onOpenEditor }: WelcomeProps) {
                     className="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200 transition-colors disabled:opacity-40"
                   >
                     <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{project.split("/").pop()}</span>
+                    <span className="truncate">{project.split(/[/\\]/).pop()}</span>
                     <span className="ml-auto text-[10px] text-zinc-600 truncate max-w-[200px]">{project}</span>
                   </button>
                 ))}
@@ -151,10 +126,10 @@ export function Welcome({ backendStatus, onOpenEditor }: WelcomeProps) {
 
       {/* Footer */}
       <div className="flex items-center justify-center gap-4 pb-6 text-[10px] text-zinc-600">
-        <span>v1.0.0</span>
+        <span>Public alpha</span>
         <span>•</span>
         <button
-          onClick={() => window.electron?.openExternal("https://github.com/kinetograph/kinetograph")}
+          onClick={() => window.electron?.openExternal("https://github.com/tanish1608/Ai-Video-editing-signoz")}
           className="hover:text-zinc-400 transition-colors"
         >
           GitHub

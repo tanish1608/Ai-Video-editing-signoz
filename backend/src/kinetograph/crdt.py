@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pycrdt import Doc, Array, Map
+from pycrdt import Array, Doc, Map
 
 logger = logging.getLogger(__name__)
 
@@ -111,15 +111,27 @@ def apply_ws_update(update: bytes) -> None:
 
 # ── JSON → CRDT helpers ────────────────────────────────────────────────────
 
+
 def _clip_to_map(clip: dict) -> Map:
     """Convert a plain dict clip to a pycrdt Map with prelim data."""
-    m = Map({
-        k: clip[k]
-        for k in ("clip_id", "source_file", "in_ms", "out_ms", "clip_type",
-                   "description", "transition", "transition_duration_ms",
-                   "overlay_text", "search_query")
-        if clip.get(k) is not None
-    })
+    m = Map(
+        {
+            k: clip[k]
+            for k in (
+                "clip_id",
+                "source_file",
+                "in_ms",
+                "out_ms",
+                "clip_type",
+                "description",
+                "transition",
+                "transition_duration_ms",
+                "overlay_text",
+                "search_query",
+            )
+            if clip.get(k) is not None
+        }
+    )
     return m
 
 
@@ -132,7 +144,7 @@ def load_paper_edit(pe: dict, *, origin: Any = None) -> None:
     with doc.transaction(origin=origin):
         # Clear
         if len(y_clips) > 0:
-            del y_clips[0:len(y_clips)]
+            del y_clips[0 : len(y_clips)]
 
         # Meta
         y_meta["title"] = pe.get("title", "Untitled Sequence")
@@ -161,16 +173,23 @@ def paper_edit_from_doc() -> dict | None:
     for i in range(len(y_clips)):
         m = y_clips[i]
         clip = {}
-        for key in ("clip_id", "source_file", "in_ms", "out_ms", "clip_type",
-                     "description", "transition", "transition_duration_ms",
-                     "overlay_text", "search_query"):
+        for key in (
+            "clip_id",
+            "source_file",
+            "in_ms",
+            "out_ms",
+            "clip_type",
+            "description",
+            "transition",
+            "transition_duration_ms",
+            "overlay_text",
+            "search_query",
+        ):
             if key in m:
                 clip[key] = m[key]
         clips.append(clip)
 
-    total_duration_ms = sum(
-        (c.get("out_ms", 0) - c.get("in_ms", 0)) for c in clips
-    )
+    total_duration_ms = sum((c.get("out_ms", 0) - c.get("in_ms", 0)) for c in clips)
 
     result: dict[str, Any] = {
         "title": y_meta.get("title", "Untitled Sequence"),
@@ -186,20 +205,29 @@ def paper_edit_from_doc() -> dict | None:
 
 # ── Document Reset ──────────────────────────────────────────────────────────
 
-def clear_doc() -> None:
-    """Remove all clips and metadata from the CRDT document.
 
-    Used when switching projects so the old timeline doesn't bleed through.
-    """
-    with doc.transaction():
-        if len(y_clips) > 0:
-            del y_clips[0:len(y_clips)]
-        if len(y_overlays) > 0:
-            del y_overlays[0:len(y_overlays)]
-        if len(y_audio) > 0:
-            del y_audio[0:len(y_audio)]
-        for key in list(y_meta.keys()):
-            del y_meta[key]
+def clear_doc() -> None:
+    """Start an independent document, discarding the outgoing project's history."""
+    global doc, y_clips, y_meta, y_overlays, y_audio, _save_pending
+    doc = Doc()
+    y_clips = doc.get("clips", type=Array)
+    y_meta = doc.get("meta", type=Map)
+    y_overlays = doc.get("overlays", type=Array)
+    y_audio = doc.get("audio", type=Array)
+    _save_pending = False
+    doc.observe(_on_doc_update)
+
+
+async def disconnect_clients() -> None:
+    """Detach old-project clients before replacing the shared document."""
+    async with _crdt_lock:
+        clients = list(_crdt_clients)
+        _crdt_clients.clear()
+    for client in clients:
+        try:
+            await client.close(code=4001, reason="Project changed")
+        except Exception:
+            logger.debug("Project client already disconnected", exc_info=True)
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
@@ -220,7 +248,9 @@ def save_snapshot() -> None:
         return
     try:
         update = doc.get_update()
-        _snapshot_path.write_bytes(update)
+        temporary = _snapshot_path.with_suffix(".tmp")
+        temporary.write_bytes(update)
+        temporary.replace(_snapshot_path)
     except Exception:
         logger.warning("Failed to save CRDT snapshot", exc_info=True)
 
@@ -304,8 +334,8 @@ def _on_doc_update(event) -> None:
     try:
         loop = asyncio.get_running_loop()
         loop.call_soon(
-            lambda u=update, o=origin_id: asyncio.ensure_future(
-                _deferred_save_and_broadcast(u, o)
+            lambda u=update, o=origin_id, source=doc: asyncio.ensure_future(
+                _deferred_save_and_broadcast(u, o, source)
             )
         )
     except RuntimeError:
@@ -313,9 +343,13 @@ def _on_doc_update(event) -> None:
         pass
 
 
-async def _deferred_save_and_broadcast(update: bytes, origin_id: Any = None) -> None:
+async def _deferred_save_and_broadcast(
+    update: bytes, origin_id: Any = None, source: Doc | None = None
+) -> None:
     """Runs on the next event loop tick — after the transaction has committed."""
     global _save_pending
+    if source is not None and source is not doc:
+        return
     if _save_pending:
         _save_pending = False
         save_snapshot()

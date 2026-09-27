@@ -43,8 +43,10 @@ def probe_media(file_path: str | Path) -> dict:
         result = subprocess.run(
             [
                 "ffprobe",
-                "-v", "quiet",
-                "-print_format", "json",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
                 file_path,
@@ -99,13 +101,15 @@ def probe_media(file_path: str | Path) -> dict:
         raise RuntimeError(f"Failed to probe {file_path}: {exc}") from exc
 
 
-def _resolve_duration_s(fmt: dict, video_stream: dict | None,
-                        audio_stream: dict | None, fps: float) -> float:
+def _resolve_duration_s(
+    fmt: dict, video_stream: dict | None, audio_stream: dict | None, fps: float
+) -> float:
     """Best-effort media duration in seconds.
 
     Tries format.duration, then each stream's duration, then nb_frames/fps for
     the video stream. Returns 0.0 when nothing usable is found (e.g. images).
     """
+
     def _as_float(v) -> float:
         try:
             return float(v)
@@ -140,12 +144,17 @@ def extract_audio(video_path: str | Path, output_path: str | Path) -> Path:
 
     result = subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vn",                    # no video
-            "-acodec", "pcm_s16le",   # 16-bit PCM
-            "-ar", "16000",           # 16 kHz
-            "-ac", "1",               # mono
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-vn",  # no video
+            "-acodec",
+            "pcm_s16le",  # 16-bit PCM
+            "-ar",
+            "16000",  # 16 kHz
+            "-ac",
+            "1",  # mono
             str(output_path),
         ],
         capture_output=True,
@@ -188,11 +197,16 @@ def extract_keyframes(
 
     result = subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-vf", f"fps=1/{interval_sec}",
-            "-q:v", "2",             # JPEG quality
-            "-frames:v", "500",      # safety cap: max 500 frames
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            f"fps=1/{interval_sec}",
+            "-q:v",
+            "2",  # JPEG quality
+            "-frames:v",
+            "500",  # safety cap: max 500 frames
             pattern,
         ],
         capture_output=True,
@@ -209,10 +223,12 @@ def extract_keyframes(
         ts_ms = i * interval_sec * 1000
         if ts_ms > duration_ms:
             break
-        keyframes.append({
-            "timestamp_ms": ts_ms,
-            "frame_path": str(frame_path),
-        })
+        keyframes.append(
+            {
+                "timestamp_ms": ts_ms,
+                "frame_path": str(frame_path),
+            }
+        )
 
     return keyframes
 
@@ -227,11 +243,18 @@ def _detect_shot_boundaries(video_path: str, duration_sec: float) -> list[float]
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-i", video_path,
-                "-filter:v", "select='gt(scene,0.3)',showinfo",
-                "-f", "null", "-",
+                "ffmpeg",
+                "-hide_banner",
+                "-i",
+                video_path,
+                "-filter:v",
+                "select='gt(scene,0.3)',showinfo",
+                "-f",
+                "null",
+                "-",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             timeout=min(120, max(30, int(duration_sec))),
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -246,8 +269,9 @@ def _detect_shot_boundaries(video_path: str, duration_sec: float) -> list[float]
     return sorted(t for t in cuts if 0.0 < t < duration_sec)
 
 
-def _shot_windows(duration_sec: float, cuts: list[float],
-                  target_sec: float, min_sec: float = 1.2) -> list[tuple[float, float]]:
+def _shot_windows(
+    duration_sec: float, cuts: list[float], target_sec: float, min_sec: float = 1.2
+) -> list[tuple[float, float]]:
     """Turn shot-cut points into [start, end) windows for VLM analysis.
 
     Windows never straddle a shot boundary and never exceed *target_sec* (a long
@@ -322,12 +346,13 @@ def extract_video_segments(
     windows = _shot_windows(duration_sec, cuts, target_sec=segment_sec)
     if not windows:
         windows = [
-            (t, min(t + segment_sec, duration_sec))
-            for t in _frange(0.0, duration_sec, segment_sec)
+            (t, min(t + segment_sec, duration_sec)) for t in _frange(0.0, duration_sec, segment_sec)
         ]
     logger.info(
         "🗄️  Segmentation: %d shot cuts → %d windows (%s)",
-        len(cuts), len(windows), "shot-aware" if cuts else "uniform-fallback",
+        len(cuts),
+        len(windows),
+        "shot-aware" if cuts else "uniform-fallback",
     )
 
     segments: list[dict] = []
@@ -342,13 +367,20 @@ def extract_video_segments(
 
         # Extract frames from [seg_start, seg_end] at the desired FPS.
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{seg_start:.3f}",
-            "-i", video_path,
-            "-t", f"{seg_dur:.3f}",
-            "-vf", f"fps={fps}",
-            "-frames:v", str(max_frames),
-            "-q:v", "2",
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{seg_start:.3f}",
+            "-i",
+            video_path,
+            "-t",
+            f"{seg_dur:.3f}",
+            "-vf",
+            f"fps={fps}",
+            "-frames:v",
+            str(max_frames),
+            "-q:v",
+            "2",
             pattern,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -359,12 +391,14 @@ def extract_video_segments(
         if not frame_paths:
             continue
 
-        segments.append({
-            "segment_index": seg_idx,
-            "start_ms": int(seg_start * 1000),
-            "end_ms": int(seg_end * 1000),
-            "frame_paths": frame_paths,
-        })
+        segments.append(
+            {
+                "segment_index": seg_idx,
+                "start_ms": int(seg_start * 1000),
+                "end_ms": int(seg_end * 1000),
+                "frame_paths": frame_paths,
+            }
+        )
 
     return segments
 
@@ -402,19 +436,34 @@ def normalize_image_to_video(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1",
-        "-i", input_path,
-        "-f", "lavfi", "-i", f"anullsrc=r={audio_rate}:cl=stereo",
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps}",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-ar", str(audio_rate),
-        "-ac", "2",
-        "-t", str(duration_s),
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        input_path,
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=r={audio_rate}:cl=stereo",
+        "-vf",
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        str(audio_rate),
+        "-ac",
+        "2",
+        "-t",
+        str(duration_s),
         "-shortest",
         str(output_path),
     ]
@@ -474,16 +523,26 @@ def normalize_clip(
         # Add a silent audio source as second input — MUST come before filters
         cmd.extend(["-f", "lavfi", "-i", f"anullsrc=r={audio_rate}:cl=stereo"])
 
-    cmd.extend([
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", str(crf or 18),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-ar", str(audio_rate),
-        "-ac", "2",
-    ])
+    cmd.extend(
+        [
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            str(crf or 18),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            str(audio_rate),
+            "-ac",
+            "2",
+        ]
+    )
 
     if not has_audio:
         cmd.extend(["-shortest"])
@@ -590,10 +649,15 @@ def normalize_audio_lufs(
 
     # Pass 1: Measure
     measure_cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
-        "-f", "null", "-",
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-af",
+        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
+        "-f",
+        "null",
+        "-",
     ]
     result = subprocess.run(measure_cmd, capture_output=True, text=True, timeout=300)
 
@@ -606,10 +670,14 @@ def normalize_audio_lufs(
         # Fallback: single-pass normalization (less precise but functional)
         logger.warning("LUFS measurement parse failed — falling back to single-pass")
         fallback_cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-            "-c:v", "copy",
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-af",
+            f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+            "-c:v",
+            "copy",
             *codec_args,
             str(output_path),
         ]
@@ -622,9 +690,12 @@ def normalize_audio_lufs(
 
     # Pass 2: Apply with measured values (linear mode for clean correction)
     apply_cmd = [
-        "ffmpeg", "-y",
-        "-i", input_path,
-        "-af", (
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-af",
+        (
             f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:"
             f"measured_I={stats['input_i']}:"
             f"measured_TP={stats['input_tp']}:"
@@ -633,7 +704,8 @@ def normalize_audio_lufs(
             f"offset={stats['target_offset']}:"
             f"linear=true:print_format=summary"
         ),
-        "-c:v", "copy",
+        "-c:v",
+        "copy",
         *codec_args,
         str(output_path),
     ]
@@ -649,13 +721,15 @@ def normalize_audio_lufs(
 # blocking.  Heavy CPU-bound work (normalize_clip, normalize_image_to_video)
 # stays synchronous because it runs in ProcessPoolExecutor workers.
 
+
 async def probe_media_async(file_path: str | Path) -> dict:
     """Async version of :func:`probe_media`."""
     return await asyncio.to_thread(probe_media, file_path)
 
 
 async def extract_audio_async(
-    video_path: str | Path, output_path: str | Path,
+    video_path: str | Path,
+    output_path: str | Path,
 ) -> Path:
     """Async version of :func:`extract_audio`."""
     return await asyncio.to_thread(extract_audio, video_path, output_path)
@@ -679,7 +753,12 @@ async def extract_video_segments_async(
 ) -> list[dict]:
     """Async version of :func:`extract_video_segments`."""
     return await asyncio.to_thread(
-        extract_video_segments, video_path, output_dir, segment_sec, fps, max_frames,
+        extract_video_segments,
+        video_path,
+        output_dir,
+        segment_sec,
+        fps,
+        max_frames,
     )
 
 
@@ -692,5 +771,10 @@ async def normalize_audio_lufs_async(
 ) -> Path:
     """Async version of :func:`normalize_audio_lufs`."""
     return await asyncio.to_thread(
-        normalize_audio_lufs, input_path, output_path, target_lufs, output_codec, audio_bitrate,
+        normalize_audio_lufs,
+        input_path,
+        output_path,
+        target_lufs,
+        output_codec,
+        audio_bitrate,
     )

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 
 from google import genai
 from google.genai import types
@@ -58,9 +57,7 @@ def _extract_visual_tags(visual_texts: list[str], transcript: str) -> list[str]:
 
     blob = (" ".join(visual_texts) + " " + transcript).lower()
     tokens = _re.findall(r"[a-z][a-z\-]{2,}", blob)
-    counts = Counter(
-        t for t in tokens if t not in _STOPWORDS and len(t) > 2
-    )
+    counts = Counter(t for t in tokens if t not in _STOPWORDS and len(t) > 2)
     # Top content words as tags (frequency-ranked, capped for token budget).
     return [w for w, _ in counts.most_common(8)]
 
@@ -81,7 +78,9 @@ def _summarize_visuals(visual_descriptions: list[str]) -> str:
     for vd in visual_descriptions:
         vd = re.sub(
             r"^(The video (shows?|displays?|captures?|features?|depicts?)\s+)",
-            "", vd, flags=re.IGNORECASE,
+            "",
+            vd,
+            flags=re.IGNORECASE,
         )
         # Capitalize first char
         if vd:
@@ -215,10 +214,15 @@ To create an overlay clip:
 - If the video is ≤ 15 seconds total, do NOT use any overlays at all.
 - Keep overlay duration ≤ the cutaway segment it covers minus 1 s (leave breathing room).
 ## CRITICAL RULE: METAPHORS, SLANG, AND IDIOMS (DO NOT BE LITERAL)
-Human speakers use metaphors and slang. You MUST evaluate the business and emotional context of the transcript before selecting cutaway footage or generating a search query for the Synthesizer. DO NOT take metaphors literally. 
-- If the speaker says "this idea is fire" or "the energy is fire", DO NOT show literal flames. Show an "excited crowd", "celebration", or "high energy teamwork".
-- If the speaker says "we were putting out fires", DO NOT show burning buildings. Show "stressed developers typing", "fast-paced office", or "team collaboration".
-- If the speaker says "we are swimming in data", DO NOT show oceans or water. Show "server racks", "abstract data visualizations", or "scrolling code".
+Human speakers use metaphors and slang. You MUST evaluate the business and emotional context of
+the transcript before selecting cutaway footage or generating a search query for the Synthesizer.
+DO NOT take metaphors literally.
+- If the speaker says "this idea is fire" or "the energy is fire", DO NOT show literal flames.
+Show an "excited crowd", "celebration", or "high energy teamwork".
+- If the speaker says "we were putting out fires", DO NOT show burning buildings. Show "stressed
+developers typing", "fast-paced office", or "team collaboration".
+- If the speaker says "we are swimming in data", DO NOT show oceans or water. Show "server racks",
+"abstract data visualizations", or "scrolling code".
 Always deduce the UNDERLYING MEANING of the sentence before choosing the visual.
 
 ### Duration Constraint
@@ -472,6 +476,7 @@ def _validate_paper_edit(paper_edit: dict, master_index: list[dict]) -> list[str
 
 # ─── Agent Entry Point ────────────────────────────────────────────────────────
 
+
 async def scripter_node(state: GraphState) -> dict:
     """
     LangGraph node — The Scripter.
@@ -487,23 +492,27 @@ async def scripter_node(state: GraphState) -> dict:
     if not user_prompt:
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "scripter",
-                "message": "No user prompt provided",
-                "phase": Phase.SCRIPTING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "scripter",
+                    "message": "No user prompt provided",
+                    "phase": Phase.SCRIPTING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     if not master_index:
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "scripter",
-                "message": "Master index is empty — Archivist may have failed",
-                "phase": Phase.SCRIPTING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "scripter",
+                    "message": "Master index is empty — Archivist may have failed",
+                    "phase": Phase.SCRIPTING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     # Prepare a condensed version of the master index for the prompt.
@@ -548,8 +557,10 @@ async def scripter_node(state: GraphState) -> dict:
     user_message = (
         f"CREATIVE BRIEF:\n{user_prompt}\n\n"
         f"AVAILABLE FOOTAGE SUMMARY:\n"
-        f"- Speech clips (potential primary): {len(speech_entries)} segments, {speech_total_ms / 1000:.0f}s total\n"
-        f"- Visual clips (potential cutaway): {len(visual_entries)} clips, {visual_total_ms / 1000:.0f}s total\n\n"
+        f"- Speech clips (potential primary): {len(speech_entries)} "
+        f"segments, {speech_total_ms / 1000:.0f}s total\n"
+        f"- Visual clips (potential cutaway): {len(visual_entries)} clips, "
+        f"{visual_total_ms / 1000:.0f}s total\n\n"
         f"MASTER INDEX ({len(condensed_index)} segments):\n"
         f"{json.dumps(condensed_index, indent=2)}"
     )
@@ -560,7 +571,8 @@ async def scripter_node(state: GraphState) -> dict:
             f"\n\n═══ CURRENT PAPER EDIT (modify this) ═══\n"
             f"{json.dumps(existing_paper_edit, indent=2)}\n\n"
             f"IMPORTANT: The [EDIT REQUEST] above describes what the user wants changed.\n"
-            f"You MUST start from the CURRENT PAPER EDIT above and apply ONLY the requested changes.\n"
+            f"You MUST start from the CURRENT PAPER EDIT above and apply ONLY "
+            f"the requested changes.\n"
             f"Do NOT regenerate from scratch. Preserve all clips that the user did not mention.\n"
             f"If the user asks to remove something, remove those specific clips.\n"
             f"If the user asks to add something, add clips while keeping existing ones.\n"
@@ -573,7 +585,12 @@ async def scripter_node(state: GraphState) -> dict:
     # include the previous edit + the specific problems so the Scripter repairs
     # them instead of regenerating blind.
     critic_feedback = state.get("critic_feedback")
-    if not is_edit and existing_paper_edit and critic_feedback and not critic_feedback.get("approved", True):
+    if (
+        not is_edit
+        and existing_paper_edit
+        and critic_feedback
+        and not critic_feedback.get("approved", True)
+    ):
         issues = critic_feedback.get("issues", [])
         issue_lines = "\n".join(
             f"- [{i.get('severity', 'warning')}] "
@@ -611,9 +628,14 @@ async def scripter_node(state: GraphState) -> dict:
                 response = await client.aio.models.generate_content(
                     model=settings.gemini_model,
                     contents=[
-                        types.Content(role="user", parts=[
-                            types.Part.from_text(text=f"{SCRIPTER_SYSTEM_PROMPT}\n\n{attempt_message}"),
-                        ]),
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(
+                                    text=f"{SCRIPTER_SYSTEM_PROMPT}\n\n{attempt_message}"
+                                ),
+                            ],
+                        ),
                     ],
                     config=types.GenerateContentConfig(
                         temperature=0.4,
@@ -632,8 +654,7 @@ async def scripter_node(state: GraphState) -> dict:
             validation_errors = _validate_paper_edit(paper_edit, master_index)
             if validation_errors:
                 logger.warning(
-                    f"📝 Scripter: Validation errors on attempt {attempt}: "
-                    f"{validation_errors}"
+                    f"📝 Scripter: Validation errors on attempt {attempt}: {validation_errors}"
                 )
                 last_error = "; ".join(validation_errors)
                 # Retry on earlier attempts; on the last attempt fall through and
@@ -693,10 +714,13 @@ async def scripter_node(state: GraphState) -> dict:
     # All attempts failed
     return {
         "phase": Phase.ERROR,
-        "errors": [{
-            "agent": "scripter",
-            "message": f"Failed to generate valid Paper Edit after {max_attempts} attempts: {last_error}",
-            "phase": Phase.SCRIPTING,
-            "recoverable": True,
-        }],
+        "errors": [
+            {
+                "agent": "scripter",
+                "message": "Failed to generate valid Paper Edit after "
+                "{max_attempts} attempts: {last_error}",
+                "phase": Phase.SCRIPTING,
+                "recoverable": True,
+            }
+        ],
     }

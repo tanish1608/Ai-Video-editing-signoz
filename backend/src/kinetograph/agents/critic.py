@@ -31,9 +31,12 @@ logger = logging.getLogger(__name__)
 CRITIC_MAX_ITERATIONS = 2  # max Scripter→Critic revise cycles
 
 
-CRITIC_SYSTEM_PROMPT = """You are a ruthless but fair EDITORIAL QA reviewer for short-form vertical (9:16) video. \
-An editor has produced a "paper edit" (an ordered list of clips) from a creative brief and available footage. \
-Your job is to critique it against professional standards and the brief, and decide whether it needs revision.
+CRITIC_SYSTEM_PROMPT = """You are a ruthless but fair EDITORIAL QA reviewer for short-form
+vertical (9:16) video. \
+An editor has produced a "paper edit" (an ordered list of clips) from a creative brief and
+available footage. \
+Your job is to critique it against professional standards and the brief, and decide whether it
+needs revision.
 
 REVIEW CRITERIA (score each mentally, then give an overall 0-10):
 1. HOOK — Do the first 3-5 seconds grab attention? A weak opening is a BLOCKER.
@@ -42,14 +45,17 @@ REVIEW CRITERIA (score each mentally, then give an overall 0-10):
 4. PACING — Does it alternate talking-heads and cutaways for energy? Any dead stretches?
 5. CUTAWAY RELEVANCE — Do cutaways semantically match what's being said underneath them?
 6. DURATION — Does total primary-clip duration land within ±15% of the requested length?
-7. TECHNICAL SANITY — Valid clip types, no obviously broken in/out points, cutaways not longer than the primary they cover.
+7. TECHNICAL SANITY — Valid clip types, no obviously broken in/out points, cutaways not longer
+than the primary they cover.
 
 SEVERITY:
-- "blocker": must be fixed before rendering (weak hook, wrong length, irrelevant cutaways, broken structure).
+- "blocker": must be fixed before rendering (weak hook, wrong length, irrelevant cutaways, broken
+structure).
 - "warning": should be fixed (minor pacing/relevance issues).
 - "note": optional polish.
 
-Set approved=false if there is ANY blocker. Be specific: reference the clip_id and give a concrete fix.
+Set approved=false if there is ANY blocker. Be specific: reference the clip_id and give a concrete
+fix.
 Do NOT rewrite the edit — only critique it. Output MUST match the requested JSON schema exactly."""
 
 
@@ -57,16 +63,18 @@ def _condense_edit_for_review(paper_edit: dict) -> dict:
     """Trim the edit to the fields the critic needs (keeps the prompt small)."""
     clips = []
     for c in paper_edit.get("clips", []):
-        clips.append({
-            "clip_id": c.get("clip_id"),
-            "clip_type": c.get("clip_type"),
-            "in_ms": c.get("in_ms"),
-            "out_ms": c.get("out_ms"),
-            "duration_ms": (c.get("out_ms", 0) - c.get("in_ms", 0)),
-            "description": c.get("description", ""),
-            "act": c.get("act"),
-            "editorial_purpose": c.get("editorial_purpose", ""),
-        })
+        clips.append(
+            {
+                "clip_id": c.get("clip_id"),
+                "clip_type": c.get("clip_type"),
+                "in_ms": c.get("in_ms"),
+                "out_ms": c.get("out_ms"),
+                "duration_ms": (c.get("out_ms", 0) - c.get("in_ms", 0)),
+                "description": c.get("description", ""),
+                "act": c.get("act"),
+                "editorial_purpose": c.get("editorial_purpose", ""),
+            }
+        )
     return {
         "title": paper_edit.get("title", ""),
         "total_duration_ms": paper_edit.get("total_duration_ms", 0),
@@ -89,7 +97,8 @@ async def critic_node(state: GraphState) -> dict:
         return {
             "critic_iteration": iteration,
             "critic_feedback": CriticFeedback(
-                approved=True, summary="No edit to review.").model_dump(),
+                approved=True, summary="No edit to review."
+            ).model_dump(),
         }
 
     user_prompt = state.get("user_prompt", "")
@@ -102,19 +111,26 @@ async def critic_node(state: GraphState) -> dict:
         f"Critique it now."
     )
 
-    logger.info("🧐 Critic: Reviewing edit (%d clips, iteration %d)...",
-                len(paper_edit.get("clips", [])), iteration)
+    logger.info(
+        "🧐 Critic: Reviewing edit (%d clips, iteration %d)...",
+        len(paper_edit.get("clips", [])),
+        iteration,
+    )
 
     try:
         client = genai.Client(api_key=settings.gemini_api_key)
-        with llm_span("gemini", settings.gemini_model,
-                      **{"llm.role": "critic", "critic.iteration": iteration}) as span:
+        with llm_span(
+            "gemini", settings.gemini_model, **{"llm.role": "critic", "critic.iteration": iteration}
+        ) as span:
             response = await client.aio.models.generate_content(
                 model=settings.gemini_model,
                 contents=[
-                    types.Content(role="user", parts=[
-                        types.Part.from_text(text=f"{CRITIC_SYSTEM_PROMPT}\n\n{user_message}"),
-                    ]),
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(text=f"{CRITIC_SYSTEM_PROMPT}\n\n{user_message}"),
+                        ],
+                    ),
                 ],
                 config=types.GenerateContentConfig(
                     temperature=0.3,
@@ -128,8 +144,10 @@ async def critic_node(state: GraphState) -> dict:
         feedback = CriticFeedback.model_validate_json(response.text)
         logger.info(
             "🧐 Critic: score=%.1f approved=%s blockers=%d issues=%d",
-            feedback.overall_score, feedback.approved,
-            len(feedback.blockers), len(feedback.issues),
+            feedback.overall_score,
+            feedback.approved,
+            len(feedback.blockers),
+            len(feedback.issues),
         )
         return {
             "critic_iteration": iteration,

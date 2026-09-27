@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from kinetograph.core.hwaccel import hw
@@ -61,15 +61,18 @@ def escape_ffmpeg_filter_path(path: str) -> str:
 
 # ─── Data Structures ────────────────────────────────────────────────────────────
 
+
 @dataclass
 class SegmentResult:
     """Result of building one timeline segment in the filter graph."""
+
     video_label: str
     audio_label: str | None
     duration: float  # seconds
 
 
 # ─── FilterGraphBuilder ─────────────────────────────────────────────────────────
+
 
 class FilterGraphBuilder:
     """
@@ -84,9 +87,9 @@ class FilterGraphBuilder:
 
     def __init__(self, *, fps: int = 30) -> None:
         self._fps = fps
-        self._inputs: list[str] = []          # file paths (order = input index)
-        self._filters: list[str] = []         # filter expressions
-        self._counter = 0                     # monotonic label counter
+        self._inputs: list[str] = []  # file paths (order = input index)
+        self._filters: list[str] = []  # filter expressions
+        self._counter = 0  # monotonic label counter
         # Track how many times each input stream has been referenced
         # so we know when to use split/asplit.
         self._input_vid_refs: dict[int, int] = {}  # input_idx → ref count
@@ -137,7 +140,7 @@ class FilterGraphBuilder:
                 self._vid_split_labels[idx] = [f"{idx}:v"]
             else:
                 labels = [self._label("sv") for _ in range(count)]
-                outs = "".join(f"[{l}]" for l in labels)
+                outs = "".join(f"[{label}]" for label in labels)
                 self._filters.insert(0, f"[{idx}:v]split={count}{outs}")
                 self._vid_split_labels[idx] = labels
 
@@ -146,7 +149,7 @@ class FilterGraphBuilder:
                 self._aud_split_labels[idx] = [f"{idx}:a"]
             else:
                 labels = [self._label("sa") for _ in range(count)]
-                outs = "".join(f"[{l}]" for l in labels)
+                outs = "".join(f"[{label}]" for label in labels)
                 self._filters.insert(0, f"[{idx}:a]asplit={count}{outs}")
                 self._aud_split_labels[idx] = labels
 
@@ -179,8 +182,7 @@ class FilterGraphBuilder:
         lbl = self._label("ta")
         self._reserve_aud(input_idx)
         self._filters.append(
-            f"__AUD_{input_idx}__"
-            f"atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[{lbl}]"
+            f"__AUD_{input_idx}__atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS[{lbl}]"
         )
         return lbl
 
@@ -192,8 +194,7 @@ class FilterGraphBuilder:
         lbl = self._label("sil")
         # anullsrc is a *source* filter — goes directly in the filtergraph
         self._filters.append(
-            f"anullsrc=r={rate}:cl=stereo,atrim=duration={duration:.6f},"
-            f"asetpts=PTS-STARTPTS[{lbl}]"
+            f"anullsrc=r={rate}:cl=stereo,atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[{lbl}]"
         )
         return lbl
 
@@ -202,7 +203,7 @@ class FilterGraphBuilder:
         if len(labels) == 1:
             return labels[0]
         out = self._label("cv")
-        ins = "".join(f"[{l}]" for l in labels)
+        ins = "".join(f"[{label}]" for label in labels)
         self._filters.append(f"{ins}concat=n={len(labels)}:v=1:a=0[{out}]")
         return out
 
@@ -211,7 +212,7 @@ class FilterGraphBuilder:
         if len(labels) == 1:
             return labels[0]
         out = self._label("ca")
-        ins = "".join(f"[{l}]" for l in labels)
+        ins = "".join(f"[{label}]" for label in labels)
         self._filters.append(f"{ins}concat=n={len(labels)}:v=0:a=1[{out}]")
         return out
 
@@ -226,31 +227,29 @@ class FilterGraphBuilder:
         v_out = self._label("cav")
         a_out = self._label("caa")
         ins = "".join(f"[{v}][{a}]" for v, a in av_pairs)
-        self._filters.append(
-            f"{ins}concat=n={len(av_pairs)}:v=1:a=1[{v_out}][{a_out}]"
-        )
+        self._filters.append(f"{ins}concat=n={len(av_pairs)}:v=1:a=1[{v_out}][{a_out}]")
         return v_out, a_out
 
     def xfade(self, a: str, b: str, duration: float, offset: float) -> str:
         """Video crossfade (``xfade``) between two pads."""
         out = self._label("xf")
         self._filters.append(
-            f"[{a}][{b}]xfade=transition=fade:duration={duration:.6f}"
-            f":offset={offset:.6f}[{out}]"
+            f"[{a}][{b}]xfade=transition=fade:duration={duration:.6f}:offset={offset:.6f}[{out}]"
         )
         return out
 
     def acrossfade(self, a: str, b: str, duration: float) -> str:
         """Audio crossfade between two pads."""
         out = self._label("ax")
-        self._filters.append(
-            f"[{a}][{b}]acrossfade=d={duration:.6f}:c1=tri:c2=tri[{out}]"
-        )
+        self._filters.append(f"[{a}][{b}]acrossfade=d={duration:.6f}:c1=tri:c2=tri[{out}]")
         return out
 
     def fade_video(
-        self, label: str, total_dur: float,
-        fade_in: float = 0.0, fade_out: float = 0.0,
+        self,
+        label: str,
+        total_dur: float,
+        fade_in: float = 0.0,
+        fade_out: float = 0.0,
     ) -> str:
         """Apply video fade-from-black / fade-to-black."""
         parts: list[str] = []
@@ -265,8 +264,11 @@ class FilterGraphBuilder:
         return out
 
     def fade_audio(
-        self, label: str, total_dur: float,
-        fade_in: float = 0.0, fade_out: float = 0.0,
+        self,
+        label: str,
+        total_dur: float,
+        fade_in: float = 0.0,
+        fade_out: float = 0.0,
     ) -> str:
         """Apply audio fade in/out."""
         parts: list[str] = []
@@ -287,8 +289,11 @@ class FilterGraphBuilder:
         return out
 
     def overlay(
-        self, base: str, over: str,
-        x: int, y: int,
+        self,
+        base: str,
+        over: str,
+        x: int,
+        y: int,
         enable_start: float | None = None,
         enable_end: float | None = None,
         eof_action: str = "repeat",
@@ -315,9 +320,7 @@ class FilterGraphBuilder:
         if delay_seconds <= 0:
             return label
         out = self._label("dp")
-        self._filters.append(
-            f"[{label}]setpts=PTS+{delay_seconds:.6f}/TB[{out}]"
-        )
+        self._filters.append(f"[{label}]setpts=PTS+{delay_seconds:.6f}/TB[{out}]")
         return out
 
     def setpts(self, label: str) -> str:
@@ -336,9 +339,7 @@ class FilterGraphBuilder:
     def atrim_to_duration(self, label: str, duration: float) -> str:
         """Hard-trim an audio pad to *duration* seconds."""
         out = self._label("at")
-        self._filters.append(
-            f"[{label}]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[{out}]"
-        )
+        self._filters.append(f"[{label}]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[{out}]")
         return out
 
     # ── Output ────────────────────────────────────────────────────────────
@@ -504,7 +505,9 @@ class FilterGraphBuilder:
         insert_point = max(0.2, insert_point)
 
         before_ranges, after_ranges = _split_clean_ranges_at(
-            clean_ranges, insert_point, total_cutaway,
+            clean_ranges,
+            insert_point,
+            total_cutaway,
         )
 
         # ── 4. Build video parts: [before] + [cutaways] + [after] ───────
@@ -532,8 +535,7 @@ class FilterGraphBuilder:
         # _split_clean_ranges_at equals total_cutaway by construction.
         seg_a = None
         if has_audio:
-            a_labels = [self.trim_audio(primary_input, s, e)
-                        for s, e in clean_ranges]
+            a_labels = [self.trim_audio(primary_input, s, e) for s, e in clean_ranges]
             seg_a = self.concat_audio(a_labels)
 
         return SegmentResult(seg_v, seg_a, clean_duration)
@@ -666,8 +668,10 @@ class FilterGraphBuilder:
         enable_end = min(timeline_start + overlay_dur, base_duration)
 
         return self.overlay(
-            base_video, ov_v,
-            target_x, target_y,
+            base_video,
+            ov_v,
+            target_x,
+            target_y,
             enable_start=timeline_start,
             enable_end=enable_end,
             eof_action="pass",
@@ -675,6 +679,7 @@ class FilterGraphBuilder:
 
 
 # ─── Helper Functions ────────────────────────────────────────────────────────
+
 
 def _compute_clean_ranges(
     p_in: float,
@@ -796,6 +801,7 @@ def _split_clean_ranges_at(
 
 # ─── Async Render ────────────────────────────────────────────────────────────
 
+
 async def render(
     builder: FilterGraphBuilder,
     output_path: str | Path,
@@ -837,7 +843,8 @@ async def render(
 
     try:
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout,
+            proc.communicate(),
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         proc.kill()
@@ -884,7 +891,8 @@ async def run_ffmpeg_async(
 
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+                proc.communicate(),
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()

@@ -25,12 +25,18 @@ import logging
 import os
 import re
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kinetograph.config import settings
-from kinetograph.core.compositor import FilterGraphBuilder, SegmentResult, render as render_fg
-from kinetograph.core.media import normalize_clip, normalize_image_to_video, probe_media, IMAGE_EXTENSIONS
+from kinetograph.core.compositor import FilterGraphBuilder, SegmentResult
+from kinetograph.core.compositor import render as render_fg
+from kinetograph.core.media import (
+    IMAGE_EXTENSIONS,
+    normalize_clip,
+    normalize_image_to_video,
+    probe_media,
+)
 from kinetograph.state import GraphState, Phase
 
 logger = logging.getLogger(__name__)
@@ -61,7 +67,14 @@ def _normalize_one_clip(
     if Path(source_path).suffix.lower() in IMAGE_EXTENSIONS:
         normalize_image_to_video(source_path, output_path, width=width, height=height)
     else:
-        normalize_clip(source_path, output_path, color_grade=color_grade, width=width, height=height, crf=quality_crf)
+        normalize_clip(
+            source_path,
+            output_path,
+            color_grade=color_grade,
+            width=width,
+            height=height,
+            crf=quality_crf,
+        )
     return output_path
 
 
@@ -77,7 +90,7 @@ def _normalize_all_clips(
     """Normalize ALL clips to the canonical format (vertical/horizontal per settings).
 
     De-duplicates by source file so we never re-encode the same media twice.
-    Uses ProcessPoolExecutor to parallelize FFmpeg encoding across CPU cores.
+    Uses ThreadPoolExecutor to parallelize FFmpeg encoding across CPU cores.
     """
     normalized = {}
     source_cache: dict[str, str] = {}  # source_path → normalized_path
@@ -106,12 +119,16 @@ def _normalize_all_clips(
         return normalized
 
     # Parallelize FFmpeg normalization — use at most half the CPUs (FFmpeg itself is multi-threaded)
-    max_workers = max(1, min(len(work), (os.cpu_count() or 2) // 2))
-    logger.info(f"🎬 Director: Normalizing {len(work)} clips with {max_workers} parallel workers...")
+    max_workers = max(1, min(4, len(work), (os.cpu_count() or 2) // 2))
+    logger.info(
+        f"🎬 Director: Normalizing {len(work)} clips with {max_workers} parallel workers..."
+    )
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_normalize_one_clip, src, out, color_grade, width, height, quality_crf): cid
+            executor.submit(
+                _normalize_one_clip, src, out, color_grade, width, height, quality_crf
+            ): cid
             for cid, src, out in work
         }
         for future in as_completed(futures):
@@ -350,12 +367,19 @@ def _build_segment_for_fg(
 
         # ── Compute insertion point for cutaway ──
         from kinetograph.core.compositor import _compute_clean_ranges
+
         clean_ranges = _compute_clean_ranges(p_in, p_out, skip_regions)
         clean_duration = sum(e - s for s, e in clean_ranges)
 
-        insert_point = _find_best_cutaway_insert_point(
-            primary_clip_spec, master_index, clean_duration,
-        ) if cutaway_inputs else 0.0
+        insert_point = (
+            _find_best_cutaway_insert_point(
+                primary_clip_spec,
+                master_index,
+                clean_duration,
+            )
+            if cutaway_inputs
+            else 0.0
+        )
 
         return fg.build_segment(
             primary_input=primary_idx,
@@ -385,11 +409,12 @@ def _ensure_input(
 
 # ─── MoviePy crossfade concatenation ──────────────────────────────────────────
 
-_CROSSFADE_SEC = 0.2    # Short visual-only dissolve between segments
-_BOOKEND_FADE_SEC = 0.3 # Fade-in from black / fade-out to black duration
+_CROSSFADE_SEC = 0.2  # Short visual-only dissolve between segments
+_BOOKEND_FADE_SEC = 0.3  # Fade-in from black / fade-out to black duration
 
 
 # ─── Agent Entry Point ────────────────────────────────────────────────────────
+
 
 async def director_node(state: GraphState) -> dict:
     """
@@ -410,16 +435,28 @@ async def director_node(state: GraphState) -> dict:
     if not approved_edit:
         return {
             "phase": Phase.ERROR,
-            "errors": [{"agent": "director", "message": "No approved edit to render",
-                        "phase": Phase.RENDERING, "recoverable": False}],
+            "errors": [
+                {
+                    "agent": "director",
+                    "message": "No approved edit to render",
+                    "phase": Phase.RENDERING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     clips_spec = approved_edit.get("clips", [])
     if not clips_spec:
         return {
             "phase": Phase.ERROR,
-            "errors": [{"agent": "director", "message": "Approved edit has no clips",
-                        "phase": Phase.RENDERING, "recoverable": False}],
+            "errors": [
+                {
+                    "agent": "director",
+                    "message": "Approved edit has no clips",
+                    "phase": Phase.RENDERING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     render_settings = state.get("render_settings") or {}
@@ -433,21 +470,36 @@ async def director_node(state: GraphState) -> dict:
     # Step 1: Normalize all clips
     logger.info(f"🎬 Director: Normalizing {len(clips_spec)} clips to {width}×{height}...")
     color_grade = state.get("color_grade")
-    normalized = _normalize_all_clips(
-        approved_edit, synth_assets, temp_dir, color_grade=color_grade,
-        width=width, height=height, quality_crf=quality_crf,
+    normalized = await asyncio.to_thread(
+        _normalize_all_clips,
+        approved_edit,
+        synth_assets,
+        temp_dir,
+        color_grade=color_grade,
+        width=width,
+        height=height,
+        quality_crf=quality_crf,
     )
 
     if not normalized:
         return {
             "phase": Phase.ERROR,
-            "errors": [{"agent": "director", "message": "No clips could be normalized",
-                        "phase": Phase.NORMALIZING, "recoverable": False}],
+            "errors": [
+                {
+                    "agent": "director",
+                    "message": "No clips could be normalized",
+                    "phase": Phase.NORMALIZING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     # Step 2: Group into primary segments
     segments = _group_into_segments(clips_spec)
-    logger.info(f"🎬 Director: {len(segments)} segments ({sum(1 for s in segments if s['primary'])} primary + cutaway groups)")
+    logger.info(
+        f"🎬 Director: {len(segments)} segments "
+        f"({sum(1 for s in segments if s['primary'])} primary + cutaway groups)"
+    )
 
     # Step 3: Build filter graph
     fg = FilterGraphBuilder(fps=settings.output_fps)
@@ -459,7 +511,9 @@ async def director_node(state: GraphState) -> dict:
     for i, segment in enumerate(segments):
         primary_id = segment["primary"]["clip_id"] if segment["primary"] else "standalone"
         cutaway_count = len(segment["cutaways"])
-        logger.info(f"🎬 Director: Segment {i+1}: primary={primary_id}, cutaway overlays={cutaway_count}")
+        logger.info(
+            f"🎬 Director: Segment {i + 1}: primary={primary_id}, cutaway overlays={cutaway_count}"
+        )
 
         # Offload the (blocking, probe-heavy) graph-building helper off the loop.
         result = await asyncio.to_thread(
@@ -468,18 +522,26 @@ async def director_node(state: GraphState) -> dict:
         if result:
             segment_results.append(result)
         else:
-            errors.append({
-                "agent": "director",
-                "message": f"Segment {i+1} ({primary_id}) could not be built",
-                "phase": Phase.RENDERING,
-                "recoverable": True,
-            })
+            errors.append(
+                {
+                    "agent": "director",
+                    "message": f"Segment {i + 1} ({primary_id}) could not be built",
+                    "phase": Phase.RENDERING,
+                    "recoverable": True,
+                }
+            )
 
     if not segment_results:
         return {
             "phase": Phase.ERROR,
-            "errors": [{"agent": "director", "message": "No valid segments",
-                        "phase": Phase.RENDERING, "recoverable": False}],
+            "errors": [
+                {
+                    "agent": "director",
+                    "message": "No valid segments",
+                    "phase": Phase.RENDERING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     # Step 4: Chain segments with crossfade transitions
@@ -497,8 +559,15 @@ async def director_node(state: GraphState) -> dict:
         logger.info(f"🎬 Director: Compositing {len(overlay_clips)} PiP overlays...")
         final_v = await asyncio.to_thread(
             _apply_overlays_in_fg,
-            fg, final_v, overlay_clips, normalized, synth_assets, input_indices, total_dur,
-            width, height,
+            fg,
+            final_v,
+            overlay_clips,
+            normalized,
+            synth_assets,
+            input_indices,
+            total_dur,
+            width,
+            height,
         )
 
     # Note: caption burn-in is handled by the Captioner node (runs after
@@ -510,14 +579,15 @@ async def director_node(state: GraphState) -> dict:
     raw_title = approved_edit.get("title", "output")
     # Sanitize title: replace colons and other FS-unfriendly chars.
     # FFmpeg interprets colons as protocol separators on all platforms.
-    title = re.sub(r'[^\w\s\-.]', '_', raw_title).replace(' ', '_')
+    title = re.sub(r"[^\w\s\-.]", "_", raw_title).replace(" ", "_")
     output_path = settings.output_dir / "runs" / run_id / f"{title}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         logger.info(f"🎬 Director: Rendering to {output_path}...")
         await render_fg(
-            fg, str(output_path),
+            fg,
+            str(output_path),
             fps=settings.output_fps,
         )
 
@@ -549,6 +619,7 @@ async def director_node(state: GraphState) -> dict:
 
         # Cleanup temp clips
         import shutil as _shutil
+
         if temp_dir.exists():
             try:
                 _shutil.rmtree(temp_dir)
@@ -562,12 +633,19 @@ async def director_node(state: GraphState) -> dict:
         logger.error(f"🎬 Director: Render failed: {exc}")
         return {
             "phase": Phase.ERROR,
-            "errors": [{"agent": "director", "message": f"Render failed: {exc}",
-                        "phase": Phase.RENDERING, "recoverable": True}],
+            "errors": [
+                {
+                    "agent": "director",
+                    "message": f"Render failed: {exc}",
+                    "phase": Phase.RENDERING,
+                    "recoverable": True,
+                }
+            ],
         }
 
 
 # ─── PiP Overlay Compositing ────────────────────────────────────────────────
+
 
 def _apply_overlays_in_fg(
     fg: FilterGraphBuilder,
@@ -654,6 +732,8 @@ def _apply_overlays_in_fg(
             )
 
         except Exception as exc:
-            logger.error(f"🎬 Director: Failed to composite overlay {ov.get('clip_id', '?')}: {exc}")
+            logger.error(
+                f"🎬 Director: Failed to composite overlay {ov.get('clip_id', '?')}: {exc}"
+            )
 
     return current

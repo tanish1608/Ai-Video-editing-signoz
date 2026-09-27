@@ -30,12 +30,14 @@ async def export_node(state: GraphState) -> dict:
     if not approved_edit:
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "export",
-                "message": "No approved edit for timeline export",
-                "phase": Phase.EXPORTING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "export",
+                    "message": "No approved edit for timeline export",
+                    "phase": Phase.EXPORTING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     # Guard against reporting success when the upstream render never produced a
@@ -43,12 +45,14 @@ async def export_node(state: GraphState) -> dict:
     if not render_path or not Path(render_path).is_file():
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "export",
-                "message": f"No valid rendered video to export (render_path={render_path!r})",
-                "phase": Phase.EXPORTING,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "export",
+                    "message": f"No valid rendered video to export (render_path={render_path!r})",
+                    "phase": Phase.EXPORTING,
+                    "recoverable": False,
+                }
+            ],
         }
 
     try:
@@ -85,8 +89,14 @@ async def export_node(state: GraphState) -> dict:
         if render_path:
             final_render = Path(render_path).resolve()
             _INTERMEDIATE_MARKERS = (
-                "_captioned", "_mixed", "_denoised", "_normalized",
-                "_master", "_raw", "_temp", "_render",
+                "_captioned",
+                "_mixed",
+                "_denoised",
+                "_normalized",
+                "_master",
+                "_raw",
+                "_temp",
+                "_render",
             )
             for f in final_render.parent.iterdir():
                 if (
@@ -110,10 +120,12 @@ async def export_node(state: GraphState) -> dict:
         logger.error(f"📦 Export: Failed: {exc}")
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "export",
-                "message": f"Timeline export failed: {exc}",
-                "phase": Phase.EXPORTING,
-                "recoverable": True,
-            }],
+            "errors": [
+                {
+                    "agent": "export",
+                    "message": f"Timeline export failed: {exc}",
+                    "phase": Phase.EXPORTING,
+                    "recoverable": True,
+                }
+            ],
         }

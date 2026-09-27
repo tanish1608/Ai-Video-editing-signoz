@@ -42,12 +42,14 @@ async def captioner_node(state: GraphState) -> dict:
     if not render_path or not Path(render_path).exists():
         return {
             "phase": Phase.ERROR,
-            "errors": [{
-                "agent": "captioner",
-                "message": f"Rendered video not found: {render_path}",
-                "phase": Phase.RENDERED,
-                "recoverable": False,
-            }],
+            "errors": [
+                {
+                    "agent": "captioner",
+                    "message": f"Rendered video not found: {render_path}",
+                    "phase": Phase.RENDERED,
+                    "recoverable": False,
+                }
+            ],
         }
 
     if not approved_edit:
@@ -77,7 +79,9 @@ async def captioner_node(state: GraphState) -> dict:
         )
 
         if result is None:
-            logger.warning("📝 Captioner: No captions generated (no word timestamps?) — passing through")
+            logger.warning(
+                "📝 Captioner: No captions generated (no word timestamps?) — passing through"
+            )
             return {"phase": Phase.RENDERED}
 
         logger.info(f"📝 Captioner: ✓ ASS file generated → {ass_path}")
@@ -107,10 +111,12 @@ async def captioner_node(state: GraphState) -> dict:
         # Non-fatal — continue pipeline without captions
         return {
             "phase": Phase.RENDERED,
-            "errors": [{
-                "agent": "captioner",
-                "message": f"Caption generation failed (non-fatal): {exc}",
-                "phase": Phase.RENDERED,
-                "recoverable": True,
-            }],
+            "errors": [
+                {
+                    "agent": "captioner",
+                    "message": f"Caption generation failed (non-fatal): {exc}",
+                    "phase": Phase.RENDERED,
+                    "recoverable": True,
+                }
+            ],
         }

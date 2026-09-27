@@ -22,6 +22,7 @@ from typing import Literal
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import RetryPolicy
+from opentelemetry.trace import Status, StatusCode
 
 from kinetograph.agents.archivist import archivist_node
 from kinetograph.agents.captioner import captioner_node
@@ -34,7 +35,6 @@ from kinetograph.agents.sound_engineer import sound_engineer_node
 from kinetograph.agents.synthesizer import synthesizer_node
 from kinetograph.observability import agent_span, record_agent_error
 from kinetograph.state import GraphState, Phase
-from opentelemetry.trace import Status, StatusCode
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ _api_retry = RetryPolicy(
 
 
 # ── Phase Normalization ──────────────────────────────────────────────────────
+
 
 def _normalize_phase(result: dict) -> dict:
     """Convert Phase enum values to plain strings for checkpoint serialization.
@@ -66,6 +67,7 @@ def _normalize_phase(result: dict) -> dict:
 
 
 # ── Node Wrappers ────────────────────────────────────────────────────────────
+
 
 def _make_node(agent_fn, agent_name: str):
     """Wrap an agent node: OTel agent span + completion tracking + Phase norm.
@@ -113,6 +115,7 @@ def _phase_str(phase) -> str:
 
 
 # ── Deterministic Routing Functions ──────────────────────────────────────────
+
 
 def _route_after_archivist(state: GraphState) -> Literal["scripter", "error_handler"]:
     """Archivist → scripter (or error_handler on failure)."""
@@ -193,6 +196,7 @@ def _route_after_review(
 
 # ── Error Handler ────────────────────────────────────────────────────────────
 
+
 async def error_handler_node(state: GraphState) -> dict:
     """Global error handler — logs errors and terminates gracefully."""
     errors = state.get("errors", [])
@@ -208,6 +212,7 @@ async def error_handler_node(state: GraphState) -> dict:
 
 
 # ── Graph Builder ────────────────────────────────────────────────────────────
+
 
 def build_graph(start_from: str = "archivist") -> StateGraph:
     """Build the deterministic sequential LangGraph StateGraph.
@@ -226,15 +231,13 @@ def build_graph(start_from: str = "archivist") -> StateGraph:
     builder = StateGraph(GraphState)
 
     # ── Nodes ────────────────────────────────────────────────────────────
-    builder.add_node(
-        "archivist", _make_node(archivist_node, "archivist"), retry_policy=_api_retry
-    )
+    builder.add_node("archivist", _make_node(archivist_node, "archivist"), retry_policy=_api_retry)
     # No node-level retry for the scripter: it already runs its own 3-attempt
     # loop internally (JSON + validation + API errors), so a node retry would
     # stack to up to 9 Gemini calls for one node.
     builder.add_node("scripter", _make_node(scripter_node, "scripter"))
-    builder.add_node("critic", _make_node(critic_node, "critic"))   # editorial QA
-    builder.add_node("human_review", human_review_node)     # uses interrupt()
+    builder.add_node("critic", _make_node(critic_node, "critic"))  # editorial QA
+    builder.add_node("human_review", human_review_node)  # uses interrupt()
     builder.add_node(
         "synthesizer", _make_node(synthesizer_node, "synthesizer"), retry_policy=_api_retry
     )
@@ -280,6 +283,7 @@ def build_graph(start_from: str = "archivist") -> StateGraph:
 
 
 # ── Compilation Helpers ──────────────────────────────────────────────────────
+
 
 def compile_graph(start_from: str = "archivist", checkpointer=None):
     """Compile the graph with an in-memory checkpointer.

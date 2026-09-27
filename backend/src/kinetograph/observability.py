@@ -82,17 +82,17 @@ def init_telemetry(service_name: str = SERVICE_NAME) -> None:
         return
 
     try:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter,
-        )
-        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
-            OTLPMetricExporter,
-        )
 
         resource = Resource.create(
             {
@@ -116,30 +116,43 @@ def init_telemetry(service_name: str = SERVICE_NAME) -> None:
         endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
         logger.info("📡 Observability: OTel initialized → %s (service=%s)", endpoint, service_name)
     except Exception:
-        logger.warning("📡 Observability: failed to init telemetry (continuing without)", exc_info=True)
+        logger.warning(
+            "📡 Observability: failed to init telemetry (continuing without)", exc_info=True
+        )
 
 
 def _init_instruments() -> None:
     global _agent_latency_ms, _llm_tokens, _agent_errors, _agent_retries, _llm_calls
     meter = metrics.get_meter("kinetograph")
     _agent_latency_ms = meter.create_histogram(
-        "kinetograph.agent.latency", unit="ms", description="Per-agent execution time",
+        "kinetograph.agent.latency",
+        unit="ms",
+        description="Per-agent execution time",
     )
     _llm_tokens = meter.create_counter(
-        "kinetograph.llm.tokens", unit="token", description="LLM tokens used",
+        "kinetograph.llm.tokens",
+        unit="token",
+        description="LLM tokens used",
     )
     _llm_calls = meter.create_counter(
-        "kinetograph.llm.calls", unit="1", description="LLM calls made",
+        "kinetograph.llm.calls",
+        unit="1",
+        description="LLM calls made",
     )
     _agent_errors = meter.create_counter(
-        "kinetograph.agent.errors", unit="1", description="Agent errors",
+        "kinetograph.agent.errors",
+        unit="1",
+        description="Agent errors",
     )
     _agent_retries = meter.create_counter(
-        "kinetograph.agent.retries", unit="1", description="Agent retry attempts",
+        "kinetograph.agent.retries",
+        unit="1",
+        description="Agent retry attempts",
     )
 
 
 # ── Span helpers ──────────────────────────────────────────────────────────────
+
 
 @contextmanager
 def agent_span(agent_name: str, phase: Optional[str] = None, **attrs: Any) -> Iterator[Span]:
@@ -202,8 +215,9 @@ def llm_span(system: str, model: str, **attrs: Any) -> Iterator[Span]:
             raise
 
 
-def record_tokens(span: Span, *, input_tokens: int = 0, output_tokens: int = 0,
-                  system: str = "", model: str = "") -> None:
+def record_tokens(
+    span: Span, *, input_tokens: int = 0, output_tokens: int = 0, system: str = "", model: str = ""
+) -> None:
     """Attach token usage to an LLM span + the tokens counter."""
     if input_tokens:
         span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, int(input_tokens))
