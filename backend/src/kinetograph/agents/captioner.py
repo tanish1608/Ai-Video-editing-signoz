@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 from kinetograph.config import settings
-from kinetograph.core.captions import burn_captions, generate_ass_captions
+from kinetograph.core.captions import burn_captions_async, generate_ass_captions
 from kinetograph.core.media import probe_media_async
 from kinetograph.state import GraphState, Phase
 
@@ -50,7 +50,7 @@ async def captioner_node(state: GraphState) -> dict:
         if result is None:
             return {"phase": Phase.RENDERED, "render_path": source, "caption_path": None}
         output = output_dir / "captioned.mp4"
-        await asyncio.to_thread(burn_captions, source, ass_path, output)
+        await burn_captions_async(source, ass_path, output)
         return {
             "phase": Phase.RENDERED,
             "render_path": str(output),

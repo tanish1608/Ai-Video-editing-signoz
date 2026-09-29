@@ -27,6 +27,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Event
 
 from kinetograph.config import settings
 from kinetograph.core.compositor import (
@@ -67,10 +68,13 @@ def _normalize_one_clip(
     width: int | None = None,
     height: int | None = None,
     quality_crf: int | None = None,
+    cancel_event: Event | None = None,
 ) -> str:
     """Normalize a single clip (runs in a worker thread). Handles images too."""
     if Path(source_path).suffix.lower() in IMAGE_EXTENSIONS:
-        normalize_image_to_video(source_path, output_path, width=width, height=height)
+        normalize_image_to_video(
+            source_path, output_path, width=width, height=height, cancel_event=cancel_event
+        )
     else:
         normalize_clip(
             source_path,
@@ -79,6 +83,7 @@ def _normalize_one_clip(
             width=width,
             height=height,
             crf=quality_crf,
+            cancel_event=cancel_event,
         )
     return output_path
 
@@ -91,6 +96,7 @@ def _normalize_all_clips(
     width: int | None = None,
     height: int | None = None,
     quality_crf: int | None = None,
+    cancel_event: Event | None = None,
 ) -> dict[str, str]:
     """Normalize ALL clips to the canonical format (vertical/horizontal per settings).
 
@@ -131,7 +137,7 @@ def _normalize_all_clips(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _normalize_one_clip, src, out, color_grade, width, height, quality_crf
+                _normalize_one_clip, src, out, color_grade, width, height, quality_crf, cancel_event
             ): cid
             for cid, src, out in work
         }
@@ -476,16 +482,26 @@ async def director_node(state: GraphState) -> dict:
     # Step 1: Normalize all clips
     logger.info(f"🎬 Director: Normalizing {len(clips_spec)} clips to {width}×{height}...")
     color_grade = state.get("color_grade")
-    normalized = await asyncio.to_thread(
-        _normalize_all_clips,
-        approved_edit,
-        synth_assets,
-        temp_dir,
-        color_grade=color_grade,
-        width=width,
-        height=height,
-        quality_crf=quality_crf,
+    cancel_event = Event()
+    normalization = asyncio.create_task(
+        asyncio.to_thread(
+            _normalize_all_clips,
+            approved_edit,
+            synth_assets,
+            temp_dir,
+            color_grade=color_grade,
+            width=width,
+            height=height,
+            quality_crf=quality_crf,
+            cancel_event=cancel_event,
+        )
     )
+    try:
+        normalized = await asyncio.shield(normalization)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        await normalization
+        raise
 
     if not normalized:
         return {

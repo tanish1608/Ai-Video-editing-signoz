@@ -55,6 +55,7 @@ class GraphState(TypedDict, total=False):
     # ── Core pipeline state ──────────────────────────────────────────────
     phase: Phase
     raw_assets: Annotated[list[dict], operator.add]
+    analysis_stats: dict
     master_index: list[dict]
     user_prompt: str
     paper_edit: Optional[dict]

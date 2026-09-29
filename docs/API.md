@@ -35,3 +35,9 @@ A project switch saves the outgoing snapshot, disconnects CRDT clients with clos
 Pipeline runs pause at human review; `/api/pipeline/approve` resumes the saved graph. Editing content re-enters planning and approval. Render and audio changes can start later in the workflow. Check the response status and subsequent events: a started background job can still fail, and `pipeline_complete` includes its final phase.
 
 Provider requests belong to the backend. The renderer should use `desktop/src/lib/api.ts` for REST calls and the CRDT provider for timeline edits.
+
+## Run diagnostics
+
+`POST /api/pipeline/stop` cancels active work. `GET /api/runs` lists project runs;
+`GET /api/runs/{run_id}` returns a summary, events and log tail.
+See [Run diagnostics and incremental indexing](RUNS.md) for cache and key handling.

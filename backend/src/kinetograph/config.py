@@ -26,6 +26,7 @@ class Settings(BaseSettings):
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
+        env_ignore_empty=True,
     )
 
     # ── AI / LLM Keys ──────────────────────────────────
@@ -68,7 +69,9 @@ class Settings(BaseSettings):
         return value
 
     # ── VLM Pipeline Tuning ────────────────────────────
-    vlm_concurrency: int = 5  # parallel VLM requests
+    vlm_concurrency: int = Field(5, ge=1, le=16)
+    archivist_asset_concurrency: int = Field(2, ge=1, le=8)
+    archivist_stt_concurrency: int = Field(2, ge=1, le=8)
     vlm_segment_sec: float = 4.0  # seconds per video segment
     vlm_segment_fps: float = 2.0  # frame extraction rate (model spec)
     vlm_max_frames: int = 8  # max frames per segment (model min)
@@ -151,8 +154,9 @@ class Settings(BaseSettings):
         running backend would keep the keys it loaded at startup until restarted.
         Runtime-mutated fields (project dir, output size) are left untouched.
         """
-        fresh = Settings()
-        for name in (
+        from dotenv import dotenv_values
+
+        names = (
             "gemini_api_key",
             "hf_token",
             "elevenlabs_api_key",
@@ -162,7 +166,15 @@ class Settings(BaseSettings):
             "gemini_model",
             "vlm_model",
             "vlm_base_url",
-        ):
+        )
+        # Saved desktop settings are authoritative on reload, including when a
+        # launcher inherited an older nonempty key. Never mutate os.environ.
+        values = dotenv_values(self.model_config.get("env_file"))
+        overrides = {
+            name: values[name.upper()] for name in names if (values.get(name.upper()) or "").strip()
+        }
+        fresh = Settings(**overrides)
+        for name in names:
             setattr(self, name, getattr(fresh, name))
 
     # ── Media Cache (Adobe-style persistent cache) ────────────────

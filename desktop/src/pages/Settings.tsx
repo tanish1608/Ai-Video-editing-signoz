@@ -1,3 +1,4 @@
+import { KinetographAPI } from "@/lib/api";
 import { useState, useEffect } from "react";
 import { ArrowLeft, Eye, EyeOff, Save, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -45,13 +46,22 @@ const API_KEY_FIELDS: { key: keyof SettingsState; label: string; description: st
   { key: "hfToken", label: "HuggingFace Token", description: "Model downloads (optional)", required: false },
 ];
 
+const KEY_PROVIDERS: Record<string, string> = {
+  geminiApiKey: "gemini", elevenlabsApiKey: "elevenlabs", nvidiaApiKey: "nvidia",
+  pexelsApiKey: "pexels", soundstripeApiKey: "soundstripe",
+};
+
 export function Settings({ onBack }: SettingsProps) {
   const [settings, setSettings] = useState<SettingsState>(DEFAULT_SETTINGS);
   const [showKeys, setShowKeys] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState("");
 
   useEffect(() => {
+    KinetographAPI.getKeyStatus().then((s) => setKeyStatus(s.api_keys))
+      .catch(() => setError("Engine unavailable; key presence cannot be checked yet."));
     window.electron?.getSettings().then((s) => {
       if (s && typeof s === "object") {
         setSettings((prev) => ({ ...prev, ...s } as SettingsState));
@@ -61,10 +71,19 @@ export function Settings({ onBack }: SettingsProps) {
 
   const handleSave = async () => {
     setSaving(true);
+    setError("");
     try {
+      if (!window.electron) throw new Error("Save API keys from the desktop app.");
       await window.electron?.saveSettings(settings as unknown as Record<string, unknown>);
+      const status = await KinetographAPI.getKeyStatus();
+      setKeyStatus(status.api_keys);
+      if (settings.geminiApiKey.trim() && !status.api_keys.gemini) {
+        throw new Error("Saved, but the engine still cannot see the Gemini key. Check the engine env-file path.");
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save settings.");
     } finally {
       setSaving(false);
     }
@@ -93,6 +112,7 @@ export function Settings({ onBack }: SettingsProps) {
       {/* Drag region for macOS */}
       <div className="drag-region h-8 w-full shrink-0" />
 
+      {error && <p role="alert" className="px-6 py-2 text-xs text-red-400">{error}</p>}
       {/* Header */}
       <header className="flex items-center gap-3 border-b border-zinc-800 px-6 py-3">
         <button
@@ -144,6 +164,11 @@ export function Settings({ onBack }: SettingsProps) {
                     {required && <span className="text-red-400 text-[10px]">Required</span>}
                   </label>
                   <p className="text-[10px] text-zinc-600 mb-1.5">{description}</p>
+                  {KEY_PROVIDERS[key] && keyStatus[KEY_PROVIDERS[key]] !== undefined && (
+                    <p className="text-[10px] text-zinc-400 mb-1.5">
+                      {keyStatus[KEY_PROVIDERS[key]] ? "Key present in engine. Leave blank to keep it." : "No key loaded in engine."}
+                    </p>
+                  )}
                   <div className="flex items-center gap-1">
                     <input
                       type={showKeys.has(key) ? "text" : "password"}

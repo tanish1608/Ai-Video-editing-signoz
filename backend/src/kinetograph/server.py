@@ -576,8 +576,10 @@ async def health_check():
 
 @app.get("/api/config", tags=["System"])
 async def get_config():
-    """Get current project configuration (resolution, fps, etc.)."""
-    settings.reload_secrets()
+    """Get current project configuration without changing an in-flight analysis."""
+    active = sessions.active
+    if not (active and active._running_task and not active._running_task.done()):
+        settings.reload_secrets()
     return {
         "output_width": settings.output_width,
         "output_height": settings.output_height,
@@ -983,6 +985,8 @@ async def _stream_pipeline_logged(
                 phase = update.get("phase", "")
                 phase_str = _phase_val(phase)
                 run_log.node_done(node_name, phase_str, update.get("errors", []))
+                if update.get("analysis_stats"):
+                    run_log.analysis_finished(update["analysis_stats"])
                 await _broadcast(
                     {
                         "type": "phase_update",

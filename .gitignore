@@ -63,3 +63,6 @@ state/*
 .pytest_cache/
 .ruff_cache/
 *.spec
+
+# Local run prompts, transcripts, and diagnostic records
+logs/

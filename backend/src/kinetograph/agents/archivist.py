@@ -24,12 +24,17 @@ import asyncio
 import base64
 import json
 import logging
+import shutil
+import time
+import uuid
 from pathlib import Path
 
 import httpx
 from elevenlabs import ElevenLabs
+from elevenlabs.client import AsyncElevenLabs
 
 from kinetograph.config import settings
+from kinetograph.core.analysis_cache import AnalysisCache
 from kinetograph.core.media import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -132,34 +137,34 @@ async def _describe_segment_vlm(
     """
     frame_paths = segment["frame_paths"]
 
-    # ── Build multi-frame content array ───────────────────────────────────
-    prompt = _build_vlm_prompt(transcript_slice)
-
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    for fp in frame_paths:
-        b64 = _encode_image_base64(fp)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            }
-        )
-
-    payload = {
-        "model": settings.vlm_model,
-        "messages": [
-            {"role": "system", "content": "/no_think"},
-            {"role": "user", "content": content},
-        ],
-        "max_tokens": 500,
-        "temperature": 0.2,
-        "stream": False,
-        # Ask for JSON; NVIDIA NIM (OpenAI-compatible) honors this on supported
-        # models. The parser degrades gracefully if the body isn't valid JSON.
-        "response_format": {"type": "json_object"},
-    }
-
     async with sem:
+        # ── Build multi-frame content array ───────────────────────────────────
+        prompt = _build_vlm_prompt(transcript_slice)
+
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for fp in frame_paths:
+            b64 = _encode_image_base64(fp)
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                }
+            )
+
+        payload = {
+            "model": settings.vlm_model,
+            "messages": [
+                {"role": "system", "content": "/no_think"},
+                {"role": "user", "content": content},
+            ],
+            "max_tokens": 500,
+            "temperature": 0.2,
+            "stream": False,
+            # Ask for JSON; NVIDIA NIM (OpenAI-compatible) honors this on supported
+            # models. The parser degrades gracefully if the body isn't valid JSON.
+            "response_format": {"type": "json_object"},
+        }
+
         with llm_span(
             "nvidia", settings.vlm_model, **{"kinetograph.segment_start_ms": segment["start_ms"]}
         ) as _vlm_span:
@@ -231,7 +236,10 @@ async def _describe_segment_vlm(
                     subject=f"[VLM analysis failed: {exc}]",
                     clip_type=VisualCategory.OTHER,
                 )
-                return _segment_result(segment, failed, len(frame_paths))
+                return {
+                    **_segment_result(segment, failed, len(frame_paths)),
+                    "analysis_failed": True,
+                }
 
 
 def _parse_segment_visual(raw_text: str) -> "SegmentVisual":
@@ -309,59 +317,72 @@ async def _analyze_video_segments(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
     words: list[dict] | None = None,
+    cached_results: list[dict] | None = None,
+    on_result=None,
 ) -> list[dict]:
-    """
-    Analyze all segments concurrently, bounded by the shared *sem*.
-    Returns descriptions in chronological order. On global timeout, keeps the
-    segments that already completed rather than discarding everything.
+    """Reuse successful windows; persist each completion and drain children on Stop."""
+    cached = {(r["start_ms"], r["end_ms"]): r for r in cached_results or []}
 
-    When *words* (transcript) are supplied, each segment's overlapping speech is
-    passed to the VLM for audio-visual grounding.
-    """
-    total = len(segments)
-    if total == 0:
+    async def analyze(segment):
+        key = (segment["start_ms"], segment["end_ms"])
+        if key in cached:
+            return cached[key]
+        result = await _describe_segment_vlm(
+            segment,
+            asset_type,
+            client,
+            sem,
+            transcript_slice=_transcript_slice_for(words or [], *key),
+        )
+        if on_result:
+            on_result(result)
+        return result
+
+    tasks = [asyncio.create_task(analyze(segment)) for segment in segments]
+    if not tasks:
         return []
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=max(120, len(tasks) * 15))
+        if pending:
+            logger.warning("VLM timeout: %d/%d windows completed", len(done), len(tasks))
+        results = []
+        for task in done:
+            try:
+                results.append(task.result())
+            except Exception:
+                logger.exception("VLM window failed")
+        return sorted(results, key=lambda r: r["start_ms"])
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    words = words or []
 
-    # Real Tasks so we can cancel the stragglers and read completed results.
-    tasks = [
-        asyncio.ensure_future(
-            _describe_segment_vlm(
-                seg,
-                asset_type,
-                client,
-                sem,
-                transcript_slice=_transcript_slice_for(words, seg["start_ms"], seg["end_ms"]),
-            )
+async def _transcribe_audio_async(audio_path: str, http_client: httpx.AsyncClient) -> dict:
+    client = AsyncElevenLabs(api_key=settings.elevenlabs_api_key, httpx_client=http_client)
+    with open(audio_path, "rb") as file, tool_span("elevenlabs_stt"):
+        result = await client.speech_to_text.convert(
+            file=file,
+            model_id=settings.elevenlabs_stt_model,
+            language_code="en",
+            diarize=True,
+            timestamps_granularity="word",
+            tag_audio_events=True,
         )
-        for seg in segments
-    ]
-
-    # Global timeout: ~15s per segment (generous) to prevent infinite hangs.
-    global_timeout = max(120.0, total * 15.0)
-    done, pending = await asyncio.wait(tasks, timeout=global_timeout)
-
-    if pending:
-        logger.error(
-            f"🗄️  VLM global timeout after {global_timeout:.0f}s "
-            f"({len(done)}/{total} completed) — using partial results"
-        )
-        for t in pending:
-            t.cancel()
-
-    # Collect successful results from the completed tasks.
-    good_results = []
-    for t in done:
-        try:
-            r = t.result()
-            if isinstance(r, dict):
-                good_results.append(r)
-        except Exception as exc:
-            logger.warning(f"🗄️  VLM segment failed: {exc}")
-
-    # Sort by start_ms to ensure chronological order
-    return sorted(good_results, key=lambda r: r["start_ms"])
+    return {
+        "text": result.text or "",
+        "words": [
+            {
+                "text": word.text,
+                "start_ms": int((word.start or 0) * 1000),
+                "end_ms": int((word.end or 0) * 1000),
+                "speaker_id": word.speaker_id,
+            }
+            for word in (result.words or [])
+            if getattr(word, "type", "word") == "word"
+        ],
+    }
 
 
 # ─── ElevenLabs STT ───────────────────────────────────────────────────────────
@@ -661,19 +682,7 @@ def _build_asset_index(
 
 
 async def archivist_node(state: GraphState) -> dict:
-    """
-    LangGraph node — The Archivist (v2 — Nemotron video-native).
-
-    Pipeline:
-      1. Discover raw media files
-      2. Extract audio + transcribe with ElevenLabs
-      3. Split video into temporal segments (4-sec windows, 8 frames @ 2 FPS)
-      4. Analyze segments concurrently with NVIDIA Nemotron VLM
-      5. Build master index merging transcript + visual context
-    """
-    logger.info("🗄️  Archivist v2: Starting deep parse of raw assets...")
-
-    # 1. Discover (probes every file — offload the blocking scan off the loop)
+    """Incremental ingestion with bounded asset/STT/VLM concurrency and durable progress."""
     raw_assets = await asyncio.to_thread(_discover_media_files)
     if not raw_assets:
         return {
@@ -681,119 +690,156 @@ async def archivist_node(state: GraphState) -> dict:
             "errors": [
                 {
                     "agent": "archivist",
-                    "message": "No media files found in media/ directory",
-                    "phase": Phase.INGESTING,
+                    "message": "No media files found in this project",
                     "recoverable": False,
                 }
             ],
         }
-
-    logger.info(f"🗄️  Archivist: Found {len(raw_assets)} raw assets")
-
-    master_index = []
-    temp_dir = settings.state_dir / "archivist_temp"
+    started = time.monotonic()
+    metrics = {
+        "assets": len(raw_assets),
+        "cache_hits": 0,
+        "analyzed": 0,
+        "reused_windows": 0,
+        "failed_assets": 0,
+    }
+    errors = []
+    temp_dir = settings.state_dir / "archivist_temp" / uuid.uuid4().hex
     temp_dir.mkdir(parents=True, exist_ok=True)
+    asset_sem = asyncio.Semaphore(settings.archivist_asset_concurrency)
+    stt_sem = asyncio.Semaphore(settings.archivist_stt_concurrency)
+    vlm_sem = asyncio.Semaphore(settings.vlm_concurrency)
 
-    async with httpx.AsyncClient() as http_client:
-        # ONE semaphore shared across every asset — otherwise a per-asset
-        # semaphore combined with concurrent asset processing gives an effective
-        # concurrency of vlm_concurrency × N_assets, blowing past rate limits.
-        vlm_sem = asyncio.Semaphore(settings.vlm_concurrency)
+    async with httpx.AsyncClient(timeout=240) as client:
 
-        async def _process_asset(asset: dict) -> list[dict]:
-            """Process a single asset: extract audio → STT → VLM → index entries."""
-            file_path = asset["file_path"]
-            stem = Path(file_path).stem
-
-            # ── Images: single VLM description, no audio ──
-            if asset.get("is_image"):
-                logger.info(f"🗄️  Archivist: Processing image {asset['file_name']}")
-                visual_segments = []
-                try:
-                    # Create a single-frame "segment" for the VLM
-                    seg = {
-                        "start_ms": 0,
-                        "end_ms": asset["duration_ms"],
-                        "frame_paths": [file_path],  # Image IS the frame
-                    }
-                    desc = await _describe_segment_vlm(seg, "media", http_client, vlm_sem)
-                    visual_segments = [desc]
-                except Exception as exc:
-                    logger.error(f"🗄️  Image VLM failed for {asset['file_name']}: {exc}")
-                return _build_asset_index(asset, {"text": "", "words": []}, visual_segments)
-
-            # ── Videos: full audio + VLM pipeline ──
-            # 2. Extract audio + transcribe (blocking I/O — run in thread)
-            transcript_data = {"text": "", "words": []}
-            if asset["has_audio"]:
-                try:
-                    audio_path = await extract_audio_async(
-                        file_path,
-                        temp_dir / f"{stem}.wav",
-                    )
-                    # ElevenLabs SDK is sync — run in a thread to avoid blocking
-                    loop = asyncio.get_running_loop()
-                    transcript_data = await loop.run_in_executor(
-                        None,
-                        _transcribe_audio,
-                        str(audio_path),
-                    )
-                except Exception as exc:
-                    logger.error(f"🗄️  Transcription failed for {asset['file_name']}: {exc}")
-
-            # 3. Split video into temporal segments
-            visual_segments = []
-            try:
-                segments = await extract_video_segments_async(
-                    file_path,
-                    temp_dir / f"{stem}_segments",
+        async def process(asset):
+            async with asset_sem:
+                cache = AnalysisCache(asset["file_path"])
+                transcript = cache.data.get("transcript")
+                if cache.data.get("complete") and transcript is not None:
+                    metrics["cache_hits"] += 1
+                    logger.info("Archivist cache hit: %s (%s)", asset["file_name"], cache.key[:12])
+                    return _build_asset_index(asset, transcript, cache.data["visuals"])
+                metrics["analyzed"] += 1
+                metrics["reused_windows"] += len(cache.data["visuals"])
+                logger.info(
+                    "Archivist analyze: %s; cached windows=%d, transcript=%s",
+                    asset["file_name"],
+                    len(cache.data["visuals"]),
+                    transcript is not None,
                 )
+                work = temp_dir / cache.key
+                work.mkdir(parents=True, exist_ok=True)
+                stt_ok = True
 
-                # 4. Analyze all segments concurrently (shared VLM semaphore),
-                #    grounding each in the speech spoken during it (A/V fusion).
-                visual_segments = await _analyze_video_segments(
+                async def transcribe():
+                    nonlocal stt_ok
+                    if transcript is not None:
+                        return transcript
+                    if not asset.get("has_audio") or asset.get("is_image"):
+                        result = {"text": "", "words": []}
+                    else:
+                        try:
+                            async with stt_sem:
+                                audio = await extract_audio_async(
+                                    asset["file_path"], work / "audio.wav"
+                                )
+                                result = await _transcribe_audio_async(str(audio), client)
+                        except Exception as exc:
+                            stt_ok = False
+                            logger.warning(
+                                "Transcription failed for %s: %s", asset["file_name"], exc
+                            )
+                            errors.append(
+                                {
+                                    "agent": "archivist",
+                                    "recoverable": True,
+                                    "message": f"Transcription failed: {asset['file_name']}",
+                                }
+                            )
+                            return {"text": "", "words": []}
+                    cache.data["transcript"] = result
+                    cache.save()
+                    return result
+
+                async def extract():
+                    if asset.get("is_image"):
+                        return [
+                            {
+                                "start_ms": 0,
+                                "end_ms": asset["duration_ms"],
+                                "frame_paths": [asset["file_path"]],
+                            }
+                        ]
+                    return await extract_video_segments_async(asset["file_path"], work / "frames")
+
+                # Extract images while transcription runs, then ground vision in speech.
+                async with asyncio.TaskGroup() as group:
+                    transcription = group.create_task(transcribe())
+                    extraction = group.create_task(extract())
+                transcript_result, segments = transcription.result(), extraction.result()
+                # Without successful STT, do not cache ungrounded visual results.
+                visuals = await _analyze_video_segments(
                     segments,
                     "media",
-                    http_client,
+                    client,
                     vlm_sem,
-                    words=transcript_data.get("words", []),
+                    words=transcript_result.get("words", []),
+                    cached_results=cache.data["visuals"] if stt_ok else [],
+                    on_result=cache.save_visual if stt_ok else None,
                 )
-            except Exception as exc:
-                logger.error(f"🗄️  Segment analysis failed for {asset['file_name']}: {exc}")
+                complete = (
+                    stt_ok
+                    and bool(segments)
+                    and len(visuals) == len(segments)
+                    and all(not visual.get("analysis_failed") for visual in visuals)
+                )
+                cache.data["complete"] = complete
+                cache.save()
+                if not complete:
+                    errors.append(
+                        {
+                            "agent": "archivist",
+                            "recoverable": True,
+                            "message": f"Incomplete analysis: {asset['file_name']}; "
+                            "retry reuses completed work.",
+                        }
+                    )
+                return _build_asset_index(asset, transcript_result, visuals)
 
-            return _build_asset_index(asset, transcript_data, visual_segments)
-
-        # Process all assets concurrently (STT calls + VLM calls run in parallel)
-        asset_tasks = [_process_asset(asset) for asset in raw_assets]
-        asset_results = await asyncio.gather(*asset_tasks, return_exceptions=True)
-
-        for asset, result in zip(raw_assets, asset_results):
-            if isinstance(result, Exception):
-                logger.error(f"🗄️  Asset processing failed for {asset['file_name']}: {result}")
-            else:
-                master_index.extend(result)
-
-    # Persist index to disk for debugging
-    index_path = settings.state_dir / "master_index.json"
-    with open(index_path, "w") as f:
-        json.dump(master_index, f, indent=2)
-
-    # ── Cleanup temp files (WAVs, extracted frames) ───────────────────
-    # Extracted audio and keyframes are only needed during indexing.
-    # Clean them up to avoid unbounded disk growth across pipeline runs.
-    import shutil as _shutil
-
-    if temp_dir.exists():
+        tasks = [asyncio.create_task(process(asset)) for asset in raw_assets]
         try:
-            _shutil.rmtree(temp_dir)
-            logger.info(f"🗄️  Archivist: Cleaned up temp dir: {temp_dir}")
-        except OSError as exc:
-            logger.warning(f"🗄️  Archivist: Failed to clean temp dir: {exc}")
-
-    logger.info(f"🗄️  Archivist: Built master index with {len(master_index)} entries")
-
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    master_index = []
+    for asset, result in zip(raw_assets, results):
+        if isinstance(result, BaseException):
+            metrics["failed_assets"] += 1
+            logger.error("Archivist failed: %s: %s", asset["file_name"], result)
+            errors.append(
+                {
+                    "agent": "archivist",
+                    "recoverable": True,
+                    "message": f"Analysis failed: {asset['file_name']}: {result}",
+                }
+            )
+        else:
+            master_index.extend(result)
+    path = settings.state_dir / "master_index.json"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(master_index, indent=2))
+    temporary.replace(path)
+    metrics["duration_s"] = round(time.monotonic() - started, 2)
+    logger.info("Archivist summary: %s", json.dumps(metrics))
     return {
-        "phase": Phase.INDEXED,
+        "phase": Phase.INDEXED if master_index else Phase.ERROR,
         "raw_assets": raw_assets,
         "master_index": master_index,
+        "analysis_stats": metrics,
+        "errors": errors,
     }

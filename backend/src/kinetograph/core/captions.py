@@ -475,16 +475,7 @@ def generate_ass_captions(
     return output_path
 
 
-def burn_captions(
-    video_path: str | Path,
-    ass_path: str | Path,
-    output_path: str | Path,
-) -> Path:
-    """
-    Burn captions into a video using FFmpeg's ``ass`` filter.
-
-    Audio is stream-copied from the clean master so style changes preserve it.
-    """
+def _caption_command(video_path: str | Path, ass_path: str | Path, output_path: str | Path):
     video_path = str(video_path)
     ass_path_str = str(ass_path)
     output_path = Path(output_path)
@@ -493,7 +484,7 @@ def burn_captions(
     executable = caption_ffmpeg()
     # FFmpeg ass filter needs special chars escaped inside the filtergraph
     escaped = escape_ffmpeg_filter_path(ass_path_str)
-    cmd = [
+    return [
         executable,
         "-hide_banner",
         "-y",
@@ -513,13 +504,28 @@ def burn_captions(
         "copy",
         str(output_path),
     ]
-    logger.info("📝 Captions: Burning via FFmpeg ass filter...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Caption burn failed — FFmpeg ass filter error: {result.stderr[-1500:]}"
-        )
-    logger.info(f"📝 Captions: Burned → {output_path}")
+
+
+def burn_captions(video_path: str | Path, ass_path: str | Path, output_path: str | Path) -> Path:
+    result = subprocess.run(
+        _caption_command(video_path, ass_path, output_path),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Caption burn failed: {result.stderr[-1500:]}")
+    return Path(output_path)
+
+
+async def burn_captions_async(video_path: str, ass_path: Path, output_path: Path) -> Path:
+    from kinetograph.core.compositor import run_ffmpeg_async
+
+    await run_ffmpeg_async(
+        _caption_command(video_path, ass_path, output_path),
+        timeout=600,
+        description="Burn captions",
+    )
     return output_path
 
 

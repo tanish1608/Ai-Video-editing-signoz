@@ -18,7 +18,9 @@ import json
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
+from threading import Event
 
 from kinetograph.config import settings
 
@@ -419,6 +421,7 @@ def normalize_image_to_video(
     height: int | None = None,
     fps: int | None = None,
     audio_rate: int | None = None,
+    cancel_event: Event | None = None,
 ) -> Path:
     """
     Convert a still image to a video clip of the given duration.
@@ -467,7 +470,7 @@ def normalize_image_to_video(
         "-shortest",
         str(output_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = _run_normalization(cmd, 120, cancel_event)
     if result.returncode != 0:
         raise RuntimeError(f"Image-to-video failed for {input_path}: {result.stderr[:500]}")
 
@@ -483,6 +486,7 @@ def normalize_clip(
     audio_rate: int | None = None,
     color_grade: dict | None = None,
     crf: int | None = None,
+    cancel_event: Event | None = None,
 ) -> Path:
     """
     Transcode a clip to the canonical project format.
@@ -549,7 +553,7 @@ def normalize_clip(
 
     cmd.append(str(output_path))
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = _run_normalization(cmd, 600, cancel_event)
     if result.returncode != 0:
         raise RuntimeError(f"Normalization failed for {input_path}: {result.stderr[:500]}")
 
@@ -731,8 +735,30 @@ async def extract_audio_async(
     video_path: str | Path,
     output_path: str | Path,
 ) -> Path:
-    """Async version of :func:`extract_audio`."""
-    return await asyncio.to_thread(extract_audio, video_path, output_path)
+    """Extract cancellably, so Stop terminates the FFmpeg child too."""
+    from kinetograph.core.compositor import run_ffmpeg_async
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    await run_ffmpeg_async(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ],
+        timeout=600,
+        description="Extract transcription audio",
+    )
+    return output
 
 
 async def extract_keyframes_async(
@@ -751,15 +777,73 @@ async def extract_video_segments_async(
     fps: float | None = None,
     max_frames: int | None = None,
 ) -> list[dict]:
-    """Async version of :func:`extract_video_segments`."""
-    return await asyncio.to_thread(
-        extract_video_segments,
-        video_path,
-        output_dir,
-        segment_sec,
-        fps,
-        max_frames,
+    """Decode once for scene detection and sampled frames, with bounded image size.
+
+    The previous implementation launched FFmpeg once per window and decoded full
+    resolution frames. Both sampling and cut detection now share a single decoder.
+    """
+    from kinetograph.core.compositor import run_ffmpeg_async
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    fps = fps or settings.vlm_segment_fps
+    segment_sec = segment_sec or settings.vlm_segment_sec
+    max_frames = max_frames or settings.vlm_max_frames
+    meta = await probe_media_async(video_path)
+    duration = meta["duration_ms"] / 1000
+    filters = (
+        "[0:v]setpts=PTS-STARTPTS,scale='min(768,iw)':-2,split=2[scan][sample];"
+        "[scan]select='eq(n,0)+gt(scene,0.3)',showinfo[cuts];"
+        f"[sample]fps={fps}[frames]"
     )
+    _, stderr = await run_ffmpeg_async(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(video_path),
+            "-filter_complex",
+            filters,
+            "-map",
+            "[frames]",
+            "-q:v",
+            "3",
+            str(output / "frame_%06d.jpg"),
+            "-map",
+            "[cuts]",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=max(120, int(duration * 3)),
+        description="Sample frames and detect cuts",
+    )
+    cuts = sorted(
+        {
+            float(t)
+            for t in re.findall(r"pts_time:([0-9]+\.?[0-9]*)", stderr.decode(errors="replace"))
+            if 0 < float(t) < duration
+        }
+    )
+    windows = _shot_windows(duration, cuts, target_sec=segment_sec)
+    if not windows:
+        windows = [(t, min(t + segment_sec, duration)) for t in _frange(0, duration, segment_sec)]
+    frames = sorted(output.glob("frame_*.jpg"))
+    segments = []
+    for start, end in windows:
+        selected = [str(frame) for i, frame in enumerate(frames) if start <= i / fps < end]
+        if selected:
+            segments.append(
+                {
+                    "segment_index": len(segments),
+                    "start_ms": round(start * 1000),
+                    "end_ms": round(end * 1000),
+                    "frame_paths": selected[:max_frames],
+                }
+            )
+    return segments
 
 
 async def normalize_audio_lufs_async(
@@ -778,3 +862,23 @@ async def normalize_audio_lufs_async(
         output_codec,
         audio_bitrate,
     )
+
+
+def _run_normalization(cmd: list[str], timeout: int, cancel_event: Event | None):
+    """Drain and reap an encoder on cancellation, including threaded normalization."""
+    if cancel_event is None:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if cancel_event.is_set():
+        raise RuntimeError("Normalization cancelled")
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancel_event.is_set() or time.monotonic() >= deadline:
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError("Normalization cancelled or timed out")
+            try:
+                stdout, stderr = proc.communicate(timeout=0.1)
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue

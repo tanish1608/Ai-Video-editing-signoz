@@ -548,7 +548,7 @@ function writeEnvFile(settings: Record<string, unknown>): void {
   // hand-edited repo .env in dev), and keep variables the app doesn't manage.
   const existing = readEnvFile(envPath);
   const secret = (name: string, value: unknown) =>
-    `${name}=${envValue(value) || existing.get(name) || ""}`;
+    `${name}=${envValue(value).trim() || existing.get(name) || ""}`;
 
   const lines: string[] = [
     "# Kinetograph Configuration (managed by the app)",

@@ -81,6 +81,8 @@ export function reinitializeApi(): void {
 }
 
 export const KinetographAPI = {
+  getKeyStatus: () => api().get("config").json<{ api_keys: Record<string, boolean> }>(),
+
   getHealth: () =>
     api().get("health").json<{ status: string; version: string }>(),
   getConfig: () => api().get("config").json<Record<string, string | number>>(),

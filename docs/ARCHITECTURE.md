@@ -36,3 +36,11 @@ Local API access is protected by an Electron-injected per-launch token; the toke
 FFmpeg is an external prerequisite. Installers are unsigned until signing identities and notarization are configured. Offline tests and packaged backend smoke checks do not establish AI output quality or replace platform UI testing.
 
 The model default was updated because the old preview was retired; model availability remains configurable. See [Google's deprecation schedule](https://ai.google.dev/gemini-api/docs/deprecations). Electron was updated following its [security guidance](https://www.electronjs.org/docs/latest/tutorial/security).
+
+## Incremental ingestion
+
+Archivist checkpoints transcription and individual visual windows in a project-local
+cache keyed by source identity and analysis settings. Bounded asset and transcription
+workers share one vision-request semaphore. Sampled frames and scene detection share
+a decoder; transcripts and frame extraction run concurrently. Cancellation drains
+child tasks and encoder processes before a replacement run starts. See [RUNS.md](RUNS.md).

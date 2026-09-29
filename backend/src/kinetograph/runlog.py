@@ -68,6 +68,20 @@ def _find_dir(run_id: str) -> Path | None:
     return matches[-1] if matches else None
 
 
+def _redact(value: Any) -> Any:
+    if isinstance(value, str):
+        for name in _SECRET_FIELDS:
+            secret = getattr(settings, name, "") or ""
+            if secret:
+                value = value.replace(secret, "***")
+        return value
+    if isinstance(value, dict):
+        return {key: _redact(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(item) for item in value]
+    return value
+
+
 class _RedactingFormatter(logging.Formatter):
     """Replace any configured API key value (message or traceback) with ***."""
 
@@ -104,7 +118,7 @@ class RunLog:
 
     def _save_summary(self) -> None:
         tmp = self._summary_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.summary, indent=2, default=str))
+        tmp.write_text(json.dumps(_redact(self.summary), indent=2, default=str))
         tmp.replace(self._summary_path)
 
     def start(self, **meta: Any) -> None:
@@ -126,7 +140,7 @@ class RunLog:
     def event(self, kind: str, **data: Any) -> None:
         line = {"ts": _now(), "event": kind, **data}
         with open(self._events_path, "a") as f:
-            f.write(json.dumps(line, default=str) + "\n")
+            f.write(json.dumps(_redact(line), default=str) + "\n")
 
     def node_done(self, node: str, phase: str, errors: list | None = None) -> None:
         """Record a node completion; duration is time since the previous node finished."""
@@ -140,6 +154,11 @@ class RunLog:
         self.summary["errors"].extend(errors)
         self._save_summary()
         self.event("node_done", node=node, phase=phase, duration_s=duration, errors=errors)
+
+    def analysis_finished(self, metrics: dict) -> None:
+        self.summary["analysis"] = metrics
+        self._save_summary()
+        self.event("analysis_summary", **metrics)
 
     def finish(self, status: str, **extra: Any) -> None:
         """Close out this task. ``status``: complete | error | cancelled | awaiting_approval."""
